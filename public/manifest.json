@@ -1,0 +1,15 @@
+{
+  "name": "Análisis Séneca CF - Videoanálisis",
+  "short_name": "Séneca CF Análisis",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141414",
+  "theme_color": "#cc2016",
+  "icons": [
+    {
+      "src": "/seneca-shield.jpg",
+      "sizes": "512x512",
+      "type": "image/jpeg"
+    }
+  ]
+}
