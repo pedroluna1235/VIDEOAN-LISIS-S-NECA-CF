@@ -897,6 +897,19 @@ export function stepLivePlayerTracking(
     return { hasNewKeyframes: false, updatedActions: actions };
   }
 
+  // Comprobar si al menos un dibujo activo realmente necesita calcular nuevos keyframes en este instante.
+  // Si los keyframes ya están calculados, se interpola matemáticamente a 60fps sin tocar la GPU ni provocar parones.
+  const needsProcessing = activeIndices.some((idx) => {
+    const a = actions[idx];
+    if (!a.keyframes || a.keyframes.length === 0) return true;
+    const lastKf = a.keyframes[a.keyframes.length - 1];
+    return lastKf.time < currentTime - 0.05;
+  });
+
+  if (!needsProcessing) {
+    return { hasNewKeyframes: false, updatedActions: actions };
+  }
+
   const ctx = getTrackingContext();
   if (!ctx) {
     return { hasNewKeyframes: false, updatedActions: actions };

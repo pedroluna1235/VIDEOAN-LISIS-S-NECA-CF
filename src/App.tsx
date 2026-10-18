@@ -874,8 +874,8 @@ export default function App() {
         const canvas = overlayCanvasRef.current;
         if (videoEl && !videoEl.paused && canvas && drawingsRef.current.length > 0) {
           const t = videoEl.currentTime;
-          // Ejecutar análisis de tracking a ~22 fps (cada 45 ms) para máximo rendimiento sin saturar memoria
-          if (now - lastTrackTime >= 45) {
+          // Ejecutar análisis de tracking a ~14 fps (cada 70 ms) para dejar el hilo 100% fluido para el reproductor
+          if (now - lastTrackTime >= 70) {
             lastTrackTime = now;
             const { hasNewKeyframes, updatedActions } = stepLivePlayerTracking(
               videoEl,
@@ -2488,7 +2488,11 @@ export default function App() {
     ctx: CanvasRenderingContext2D,
     width: number,
     height: number,
-    bannerText: string
+    bannerText: string,
+    options?: {
+      onReadyToRecord?: () => void;
+      onBeforeFinish?: () => void;
+    }
   ): Promise<void> => {
     const videoEl = videoRef.current;
     if (!videoEl) return;
@@ -2514,12 +2518,30 @@ export default function App() {
           videoEl.removeEventListener('seeked', onSeeked);
           resSeek();
         };
-        if (Math.abs(videoEl.currentTime - freezeTime) < 0.05) {
+        if (Math.abs(videoEl.currentTime - freezeTime) < 0.05 && videoEl.readyState >= 2) {
           resSeek();
         } else {
-          videoEl.addEventListener('seeked', onSeeked);
+          videoEl.addEventListener('seeked', onSeeked, { once: true });
+          setTimeout(resSeek, 250);
         }
       });
+
+      // Dibuja el fotograma exacto en el canvas antes de habilitar la grabación
+      drawVideoFrameCropped(ctx, videoEl, width, height);
+      ctx.save();
+      ctx.scale(width / 1280, height / 720);
+      renderDrawingActions(ctx, drawingsRef.current, {
+        currentTime: freezeTime,
+        selectedId: null,
+        ignoreTimeVisibility: true,
+        videoElement: videoEl,
+        senecaLogoImg: senecaLogoRef.current,
+      });
+      ctx.restore();
+      drawBanner();
+
+      // Notificar que el fotograma está dibujado y listo para comenzar o reanudar grabación sin silencios
+      options?.onReadyToRecord?.();
 
       const holdMs = Math.max(2, clip.freezeDuration || insertFreezeSeconds || 5) * 1000;
       const startPerf = performance.now();
@@ -2527,13 +2549,11 @@ export default function App() {
       await new Promise<void>((res) => {
         const holdStep = () => {
           if (performance.now() - startPerf >= holdMs) {
+            options?.onBeforeFinish?.();
             res();
             return;
           }
-          // Dibuja el fotograma nativo del vídeo con la máxima calidad y nitidez
           drawVideoFrameCropped(ctx, videoEl, width, height);
-
-          // Renderiza los dibujos tácticos vectoriales escalados perfectamente
           ctx.save();
           ctx.scale(width / 1280, height / 720);
           renderDrawingActions(ctx, drawingsRef.current, {
@@ -2544,7 +2564,6 @@ export default function App() {
             senecaLogoImg: senecaLogoRef.current,
           });
           ctx.restore();
-
           drawBanner();
           requestAnimationFrame(holdStep);
         };
@@ -2578,10 +2597,30 @@ export default function App() {
         hasStarted = true;
         videoEl.removeEventListener('seeked', startPlayback);
         videoEl.playbackRate = 1.0;
+
+        // Dibuja el fotograma inicial en el canvas antes de arrancar o reanudar el recorder
+        drawVideoFrameCropped(ctx, videoEl, width, height);
+        ctx.save();
+        ctx.scale(width / 1280, height / 720);
+        renderDrawingActions(ctx, drawingsRef.current, {
+          currentTime: videoEl.currentTime,
+          selectedId: null,
+          ignoreTimeVisibility: false,
+          videoElement: videoEl,
+          senecaLogoImg: senecaLogoRef.current,
+        });
+        ctx.restore();
+        drawBanner();
+
+        // Notificar que la imagen ya está visible para empezar a grabar justo al moverse
+        options?.onReadyToRecord?.();
+
         videoEl.play().catch(() => {});
 
         const step = async () => {
           if (videoEl.currentTime >= clip.endTime || videoEl.ended) {
+            // Pausar o finalizar el recorder ANTES de congelar el reproductor
+            options?.onBeforeFinish?.();
             videoEl.pause();
             videoEl.muted = prevMuted;
             videoEl.playbackRate = prevRate;
@@ -2592,7 +2631,7 @@ export default function App() {
           const hitFreeze = nestedFreezes.find(
             (nf) =>
               !usedNestedIds.has(nf.id) &&
-              Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.22
+              Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.20
           );
 
           if (hitFreeze) {
@@ -2630,15 +2669,16 @@ export default function App() {
 
           drawVideoFrameCropped(ctx, videoEl, width, height);
 
-          // Optimización: Limitar el cálculo de visión artificial por tracking a ~10 fps (cada 100ms)
-          // solo si algún dibujo aún no tiene keyframes calculados. El renderizado visual de los
-          // dibujos se interpola suavemente a 60fps usando sus puntos sin ralentizar el hilo gráfico.
+          // Optimización: Solo computar tracking de visión artificial si algún dibujo carece de keyframes en este instante
           const nowPerf = performance.now();
           if (nowPerf - lastTrackPerf >= 100) {
             lastTrackPerf = nowPerf;
-            const hasUntracked = drawingsRef.current.some(
-              (a) => a.trackPlayers !== false && (!a.keyframes || a.keyframes.length === 0)
-            );
+            const hasUntracked = drawingsRef.current.some((a) => {
+              if (a.trackPlayers === false) return false;
+              if (!a.keyframes || a.keyframes.length === 0) return true;
+              const lastKf = a.keyframes[a.keyframes.length - 1];
+              return lastKf.time < videoEl.currentTime - 0.05;
+            });
             if (hasUntracked) {
               try {
                 const { updatedActions } = stepLivePlayerTracking(
@@ -2677,7 +2717,7 @@ export default function App() {
         videoEl.currentTime = clip.startTime;
         setTimeout(() => {
           if (!hasStarted) startPlayback();
-        }, 350);
+        }, 300);
       }
     });
   };
@@ -2714,21 +2754,37 @@ export default function App() {
       if (ev.data.size > 0) chunks.push(ev.data);
     };
 
-    recorder.start();
+    const stopPromise = new Promise<Blob>((resolve) => {
+      recorder.onstop = () => {
+        resolve(new Blob(chunks, { type: mimeType }));
+      };
+    });
+
     await renderClipToExportCanvas(
       clip,
       ctx,
       width,
       height,
-      `SÉNECA CF | ${clip.category.toUpperCase()} · ${clip.name.toUpperCase()}`
+      `SÉNECA CF | ${clip.category.toUpperCase()} · ${clip.name.toUpperCase()}`,
+      {
+        onReadyToRecord: () => {
+          if (recorder.state === 'inactive') {
+            recorder.start();
+          }
+        },
+        onBeforeFinish: () => {
+          if (recorder.state === 'recording') {
+            recorder.stop();
+          }
+        },
+      }
     );
 
-    return new Promise((resolve) => {
-      recorder.onstop = () => {
-        resolve(new Blob(chunks, { type: mimeType }));
-      };
-      if (recorder.state === 'recording') recorder.stop();
-    });
+    if (recorder.state === 'recording') {
+      recorder.stop();
+    }
+
+    return stopPromise;
   };
 
   const handleDownloadMergedOrAll = async (
@@ -2800,7 +2856,11 @@ export default function App() {
           if (e.data.size > 0) chunks.push(e.data);
         };
 
-        recorder.start();
+        const stopPromise = new Promise<Blob>((resolve) => {
+          recorder.onstop = () => {
+            resolve(new Blob(chunks, { type: mimeType }));
+          };
+        });
 
         for (let i = 0; i < targetClips.length; i++) {
           const clip = targetClips[i];
@@ -2810,21 +2870,39 @@ export default function App() {
             ctx,
             width,
             height,
-            `SÉNECA CF | [${i + 1}/${targetClips.length}] ${clip.category.toUpperCase()} - ${clip.name.toUpperCase()}`
+            `SÉNECA CF | [${i + 1}/${targetClips.length}] ${clip.category.toUpperCase()} - ${clip.name.toUpperCase()}`,
+            {
+              onReadyToRecord: () => {
+                if (recorder.state === 'inactive') {
+                  recorder.start();
+                } else if (recorder.state === 'paused') {
+                  recorder.resume();
+                }
+              },
+              onBeforeFinish: () => {
+                if (i < targetClips.length - 1) {
+                  if (recorder.state === 'recording') {
+                    recorder.pause();
+                  }
+                } else {
+                  if (recorder.state === 'recording') {
+                    recorder.stop();
+                  }
+                }
+              },
+            }
           );
         }
 
-        await new Promise<void>((res) => {
-          recorder.onstop = () => {
-            const mergedBlob = new Blob(chunks, { type: mimeType });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(mergedBlob);
-            a.download = `${baseName}_AGRUPADO.webm`;
-            a.click();
-            res();
-          };
+        if (recorder.state === 'recording' || recorder.state === 'paused') {
           recorder.stop();
-        });
+        }
+
+        const mergedBlob = await stopPromise;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(mergedBlob);
+        a.download = `${baseName}_AGRUPADO.webm`;
+        a.click();
         notify('Vídeo agrupado descargado con éxito');
       }
     } finally {
