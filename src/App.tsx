@@ -361,7 +361,17 @@ export default function App() {
   const [botoneraTemplates, setBotoneraTemplates] = useState<BotoneraTemplate[]>(() => {
     try {
       const local = localStorage.getItem('seneca_botonera_templates');
-      if (local) return JSON.parse(local);
+      if (local) {
+        const parsed: BotoneraTemplate[] = JSON.parse(local);
+        return parsed.map((t) => ({
+          ...t,
+          categories: t.categories.map((c) => ({
+            ...c,
+            preRoll: 10,
+            postRoll: 10,
+          })),
+        }));
+      }
     } catch {}
     return DEFAULT_BOTONERA_TEMPLATES;
   });
@@ -401,8 +411,8 @@ export default function App() {
   const [newCatName, setNewCatName] = useState<string>('');
   const [newCatColor, setNewCatColor] = useState<string>('#cc2016');
   const [newCatShortcut, setNewCatShortcut] = useState<string>('');
-  const [newCatPreRoll, setNewCatPreRoll] = useState<number>(5);
-  const [newCatPostRoll, setNewCatPostRoll] = useState<number>(5);
+  const [newCatPreRoll, setNewCatPreRoll] = useState<number>(10);
+  const [newCatPostRoll, setNewCatPostRoll] = useState<number>(10);
   const [newCatType, setNewCatType] = useState<'Ataque' | 'Defensa' | 'Transición' | 'ABP' | 'Resultado'>('Ataque');
   const [newCatMode, setNewCatMode] = useState<'auto' | 'manual'>('auto');
   const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
@@ -509,7 +519,13 @@ export default function App() {
         setDrawings(Array.isArray(parsed.drawings) ? parsed.drawings : []);
         setMarkers(parsed.markers || {});
         if (parsed.tag_categories && parsed.tag_categories.length > 0) {
-          setTagCategories(parsed.tag_categories);
+          setTagCategories(
+            parsed.tag_categories.map((c: TagCategory) => ({
+              ...c,
+              preRoll: 10,
+              postRoll: 10,
+            }))
+          );
         }
         if (parsed.playlists && parsed.playlists.length > 0) {
           setPlaylists(parsed.playlists);
@@ -555,7 +571,15 @@ export default function App() {
             setCaptures(latest.captures || []);
             setDrawings(latest.drawings || []);
             setMarkers(latest.markers || {});
-            if (latest.tag_categories?.length) setTagCategories(latest.tag_categories);
+            if (latest.tag_categories?.length) {
+              setTagCategories(
+                latest.tag_categories.map((c: TagCategory) => ({
+                  ...c,
+                  preRoll: 10,
+                  postRoll: 10,
+                }))
+              );
+            }
             if (latest.playlists?.length) setPlaylists(latest.playlists);
           }
         }
@@ -2128,9 +2152,9 @@ export default function App() {
         }
       }
 
-      // Caso 2: Modo Automático con Pre-roll / Post-roll
-      const pre = duration > 0 && duration <= 20 ? 1.2 : cat.preRoll || 5;
-      const post = duration > 0 && duration <= 20 ? 1.5 : cat.postRoll || 5;
+      // Caso 2: Modo Automático con Pre-roll / Post-roll (-10s / +10s)
+      const pre = activeVideo?.isDemo && duration <= 10 ? 1.2 : cat.preRoll ?? 10;
+      const post = activeVideo?.isDemo && duration <= 10 ? 1.5 : cat.postRoll ?? 10;
       const start = Number(Math.max(0, baseTime - pre).toFixed(1));
       const endRaw = activeTab === 'sin_video' ? baseTime + post : Math.min(maxTimelineDuration, baseTime + post);
       const end = Number(Math.max(start + 1.2, endRaw).toFixed(1));
@@ -2341,8 +2365,8 @@ export default function App() {
       name: newCatName.trim(),
       color: newCatColor || '#cc2016',
       shortcut: shortcutAuto,
-      preRoll: Number(newCatPreRoll) || 5,
-      postRoll: Number(newCatPostRoll) || 5,
+      preRoll: Number(newCatPreRoll) || 10,
+      postRoll: Number(newCatPostRoll) || 10,
       type: newCatType,
       mode: newCatMode,
     };
@@ -3414,7 +3438,7 @@ ${xmlInstances}
                           handleQuickCategoryTag(cat, isManualMode ? 'auto' : 'manual');
                         }}
                         className="bg-black/30 hover:bg-black/60 text-white/90 px-1.5 py-0.5 rounded text-[9.5px]"
-                        title={isManualMode ? 'Corte automático de 5s' : 'Iniciar grabación manual'}
+                        title={isManualMode ? 'Corte automático (-10s / +10s)' : 'Iniciar grabación manual'}
                       >
                         {isManualMode ? 'Cortar auto' : '● REC Manual'}
                       </button>
@@ -8020,6 +8044,22 @@ ${xmlInstances}
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => {
+                            setTagCategories((prev) =>
+                              prev.map((c) => ({
+                                ...c,
+                                preRoll: 10,
+                                postRoll: 10,
+                              }))
+                            );
+                            notify('Todos los botones configurados a -10s antes y +10s después');
+                          }}
+                          className="text-[11px] text-[#f5b800] hover:text-amber-300 font-bold underline"
+                          title="Fijar corte de 10s antes y 10s después para todas las categorías"
+                        >
+                          Poner todos a -10s/+10s
+                        </button>
+                        <button
+                          onClick={() => {
                             if (window.confirm('¿Restaurar las 10 categorías por defecto?')) {
                               setTagCategories(DEFAULT_TAG_CATEGORIES);
                               notify('Categorías restauradas por defecto');
@@ -8096,9 +8136,38 @@ ${xmlInstances}
                             </button>
 
                             {cat.mode !== 'manual' && (
-                              <div className="flex items-center gap-1 text-[11px] text-gray-400">
-                                <span>-{cat.preRoll}s</span>
-                                <span>/+{cat.postRoll}s</span>
+                              <div className="flex items-center gap-0.5 text-[11px] text-gray-400">
+                                <span>-</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={60}
+                                  value={cat.preRoll ?? 10}
+                                  onChange={(e) => {
+                                    const val = Number(e.target.value) || 10;
+                                    setTagCategories((prev) =>
+                                      prev.map((c) => (c.id === cat.id ? { ...c, preRoll: val } : c))
+                                    );
+                                  }}
+                                  className="w-10 bg-[#11141c] border border-gray-700 rounded px-1 py-0.5 text-center font-bold text-white text-xs"
+                                  title="Segundos antes (pre-roll)"
+                                />
+                                <span>s / +</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={60}
+                                  value={cat.postRoll ?? 10}
+                                  onChange={(e) => {
+                                    const val = Number(e.target.value) || 10;
+                                    setTagCategories((prev) =>
+                                      prev.map((c) => (c.id === cat.id ? { ...c, postRoll: val } : c))
+                                    );
+                                  }}
+                                  className="w-10 bg-[#11141c] border border-gray-700 rounded px-1 py-0.5 text-center font-bold text-white text-xs"
+                                  title="Segundos después (post-roll)"
+                                />
+                                <span>s</span>
                               </div>
                             )}
 
