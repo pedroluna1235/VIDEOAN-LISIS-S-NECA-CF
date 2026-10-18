@@ -21,11 +21,15 @@ import { createDemoMatchVideoBlobUrl, formatTimecode, getMatchPeriodClock } from
 import { renderDrawingActions, hitTestDrawing, hitTestDrawingPointIndex } from './pintadoRenderer';
 import {
   captureDrawingTemplates,
+  detectVideoCropBounds,
+  drawVideoFrameCropped,
   getInterpolatedPointsAtTime,
   isRigidRadiusTool,
   resetTrackerState,
+  setActiveVideoCropBounds,
   stepLivePlayerTracking,
   upsertManualKeyframe,
+  VideoCropBounds,
 } from './playerTracker';
 import {
   Volume2,
@@ -125,6 +129,69 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [videoZoom, setVideoZoom] = useState<number>(100);
+  const [autoCropBlackBars, setAutoCropBlackBars] = useState<boolean>(true);
+  const [videoCropBounds, setVideoCropBounds] = useState<VideoCropBounds>({
+    left: 0,
+    right: 1,
+    top: 0,
+    bottom: 1,
+  });
+  const lastCropDetectTimeRef = useRef<number>(0);
+
+  const refreshVideoCropBounds = useCallback(
+    (videoEl: HTMLVideoElement | null, force = false) => {
+      if (!autoCropBlackBars) {
+        const full = { left: 0, right: 1, top: 0, bottom: 1 };
+        setVideoCropBounds(full);
+        setActiveVideoCropBounds(full);
+        return;
+      }
+      if (!videoEl || videoEl.readyState < 2) return;
+      const now = performance.now();
+      if (!force && now - lastCropDetectTimeRef.current < 400) return;
+      lastCropDetectTimeRef.current = now;
+
+      const detected = detectVideoCropBounds(videoEl);
+      if (!detected) return;
+
+      setVideoCropBounds((prev) => {
+        const isDefault =
+          prev.left === 0 && prev.right === 1 && prev.top === 0 && prev.bottom === 1;
+        if (force || isDefault) {
+          setActiveVideoCropBounds(detected);
+          return detected;
+        }
+        // Estabilizar para evitar vibración durante reproducción salvo cambio claro de encuadre
+        const diff =
+          Math.abs(prev.left - detected.left) +
+          Math.abs(prev.right - detected.right) +
+          Math.abs(prev.top - detected.top) +
+          Math.abs(prev.bottom - detected.bottom);
+        if (diff > 0.04) {
+          setActiveVideoCropBounds(detected);
+          return detected;
+        }
+        return prev;
+      });
+    },
+    [autoCropBlackBars]
+  );
+
+  useEffect(() => {
+    const full = { left: 0, right: 1, top: 0, bottom: 1 };
+    setVideoCropBounds(full);
+    setActiveVideoCropBounds(full);
+    if (!activeVideoId) return;
+    const t1 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 80);
+    const t2 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 300);
+    const t3 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 700);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      clearTimeout(t3);
+    };
+  }, [activeVideoId, refreshVideoCropBounds]);
+
   const [timelineZoom, setTimelineZoom] = useState<number>(1);
   const [isDraggingOver, setIsDraggingOver] = useState<boolean>(false);
   const [isGeneratingDemo, setIsGeneratingDemo] = useState<boolean>(false);
@@ -144,8 +211,9 @@ export default function App() {
     | { type: 'eventEnd'; eventId: string }
   >(null);
 
-  // Modal o formulario rápido para nombrar el corte al pulsar Punto B
+  // Modal o formulario rápido para clasificar el corte (quién lo ha hecho y positivo/negativo)
   const [pendingClipRange, setPendingClipRange] = useState<{ start: number; end: number } | null>(null);
+  const [editingClipId, setEditingClipId] = useState<string | null>(null);
   const [newClipName, setNewClipName] = useState<string>('');
   const [newClipCategory, setNewClipCategory] = useState<string>('Salida de Balón');
   const [newClipTeam, setNewClipTeam] = useState<'Séneca CF' | 'Rival'>('Séneca CF');
@@ -168,12 +236,13 @@ export default function App() {
   // =========================================================================
   // AGRUPACIÓN Y FILTRADO DE CORTES SEGÚN LO CLASIFICADO (NACSPORT / LONGO)
   // =========================================================================
-  const [eventsGroupBy, setEventsGroupBy] = useState<'none' | 'category' | 'team' | 'half' | 'player' | 'zone'>(
-    'category'
-  );
+  const [eventsGroupBy, setEventsGroupBy] = useState<
+    'none' | 'category' | 'team' | 'half' | 'player' | 'outcome' | 'zone'
+  >('category');
   const [filterTeam, setFilterTeam] = useState<'ALL' | 'Séneca CF' | 'Rival'>('ALL');
   const [filterCategory, setFilterCategory] = useState<string>('ALL');
   const [filterHalf, setFilterHalf] = useState<'ALL' | '1ª Parte' | '2ª Parte'>('ALL');
+  const [filterOutcome, setFilterOutcome] = useState<'ALL' | 'positivo' | 'negativo'>('ALL');
   const [checkedClipIds, setCheckedClipIds] = useState<string[]>([]);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [playingQueue, setPlayingQueue] = useState<ClipEvent[] | null>(null);
@@ -248,7 +317,7 @@ export default function App() {
   const [liveHalf, setLiveHalf] = useState<'1ª Parte' | '2ª Parte'>('1ª Parte');
   const [selectedPitchZone, setSelectedPitchZone] = useState<string>('Zona Media Centro');
   const [selectedTeamFilter, setSelectedTeamFilter] = useState<'Séneca CF' | 'Rival'>('Séneca CF');
-  const [selectedPlayerTag, setSelectedPlayerTag] = useState<string>('9. Delantero Centro');
+  const [selectedPlayerTag, setSelectedPlayerTag] = useState<string>('');
   const [activeDescriptors, setActiveDescriptors] = useState<string[]>(['Éxito / Positivo']);
 
   // PWA Install Prompt
@@ -638,6 +707,7 @@ export default function App() {
     if (!videoRef.current) return;
     const t = videoRef.current.currentTime;
     setCurrentTime(t);
+    refreshVideoCropBounds(videoRef.current);
 
     // Pausa táctica automática cuando el vídeo pasa por una Imagen Parada insertada (el vídeo se detiene por completo)
     if (!videoRef.current.paused && !activeFreezeOverlay) {
@@ -1214,7 +1284,7 @@ export default function App() {
       let drewVideo = false;
       if (videoRef.current && activeVideo && videoRef.current.readyState >= 2) {
         try {
-          ctx.drawImage(videoRef.current, 0, 0, outCanvas.width, outCanvas.height);
+          drawVideoFrameCropped(ctx, videoRef.current, outCanvas.width, outCanvas.height);
           drewVideo = true;
         } catch {
           drewVideo = false;
@@ -1687,11 +1757,69 @@ export default function App() {
     notify(`Punto A (Inicio) marcado en la línea de tiempo (${formatTimecode(t)})`);
   };
 
+  const allAvailablePlayers = useMemo(() => {
+    const fromRoster = rosterPlayers.map((rp) => `${rp.dorsal}. ${rp.name}`);
+    return Array.from(new Set([...SENECA_PLAYERS, ...fromRoster]));
+  }, [rosterPlayers]);
+
+  const getClipOutcome = useCallback((descriptors?: string[]): 'positivo' | 'negativo' | 'neutro' => {
+    const list = descriptors || [];
+    if (list.some((d) => d.includes('Positivo') || d.includes('Éxito'))) return 'positivo';
+    if (list.some((d) => d.includes('Negativo') || d.includes('Pérdida') || d.includes('Fallo'))) return 'negativo';
+    return 'neutro';
+  }, []);
+
+  const applyOutcomeToDescriptors = useCallback(
+    (descriptors: string[] | undefined, outcome: 'positivo' | 'negativo' | 'neutro'): string[] => {
+      const cleaned = (descriptors || []).filter(
+        (d) =>
+          d !== 'Éxito / Positivo' &&
+          d !== 'Pérdida / Fallo' &&
+          d !== 'Negativo / Fallo' &&
+          !d.includes('Positivo') &&
+          !d.includes('Negativo')
+      );
+      if (outcome === 'positivo') return ['Éxito / Positivo', ...cleaned];
+      if (outcome === 'negativo') return ['Pérdida / Fallo', ...cleaned];
+      return cleaned;
+    },
+    []
+  );
+
+  const updateExistingClip = useCallback(
+    (clipId: string, patch: Partial<ClipEvent>) => {
+      const updated = events.map((ev) => (ev.id === clipId ? { ...ev, ...patch } : ev));
+      setEvents(updated);
+      pushHistory({ events: updated });
+    },
+    [events, pushHistory]
+  );
+
+  const openEditClipModal = useCallback(
+    (ev: ClipEvent) => {
+      if (activeTab !== 'sin_video' && videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+        setIsPlaying(false);
+      }
+      setEditingClipId(ev.id);
+      setPendingClipRange({ start: ev.startTime, end: ev.endTime });
+      setNewClipCategory(ev.category);
+      setNewClipName(ev.name);
+      setNewClipTeam(ev.team);
+      setNewClipPlayer(ev.player || '');
+      setNewClipDescriptors(ev.descriptors && ev.descriptors.length > 0 ? ev.descriptors : []);
+      if (ev.zone) setSelectedPitchZone(ev.zone);
+      setNewClipNotes(ev.notes || '');
+      setSelectedEventId(ev.id);
+    },
+    [activeTab]
+  );
+
   const handleSetPointB = () => {
     const t = activeTab === 'sin_video' ? liveTimerSeconds : currentTime;
-    const start = pointA !== null ? Math.min(pointA, t) : Math.max(0, t - 4);
+    const start = Number((pointA !== null ? Math.min(pointA, t) : Math.max(0, t - 4)).toFixed(1));
     const end = pointA !== null ? Math.max(pointA, t) : t;
-    const finalEnd = end <= start ? start + 2.5 : end;
+    const finalEnd = Number((end <= start ? start + 2.5 : end).toFixed(1));
 
     setPointA(start);
     setPointB(finalEnd);
@@ -1701,8 +1829,13 @@ export default function App() {
       setIsPlaying(false);
     }
 
+    setEditingClipId(null);
     setPendingClipRange({ start, end: finalEnd });
     setNewClipName(`${newClipCategory}`);
+    setNewClipTeam(selectedTeamFilter);
+    setNewClipPlayer(selectedPlayerTag);
+    setNewClipDescriptors(activeDescriptors);
+    setNewClipNotes('');
   };
 
   const confirmSavePendingClip = () => {
@@ -1716,21 +1849,50 @@ export default function App() {
       detectedHalf = '1ª Parte';
     }
 
+    if (editingClipId) {
+      const updated = events.map((ev) =>
+        ev.id === editingClipId
+          ? {
+              ...ev,
+              name: newClipName.trim() || `${newClipCategory}`,
+              category: newClipCategory,
+              color: catObj?.color || ev.color || '#cc2016',
+              startTime: Number(pendingClipRange.start.toFixed(1)),
+              endTime: Number(Math.max(pendingClipRange.start + 0.5, pendingClipRange.end).toFixed(1)),
+              team: newClipTeam,
+              player: newClipPlayer.trim() || undefined,
+              zone: selectedPitchZone,
+              half: detectedHalf,
+              descriptors: newClipDescriptors,
+              notes: newClipNotes.trim() || undefined,
+            }
+          : ev
+      );
+      setEvents(updated);
+      pushHistory({ events: updated });
+      setSelectedEventId(editingClipId);
+      setEditingClipId(null);
+      setPendingClipRange(null);
+      setNewClipNotes('');
+      notify(`Acción actualizada: ${newClipPlayer.trim() || newClipTeam}`);
+      return;
+    }
+
     const newClip: ClipEvent = {
-      id: `ev-${Date.now()}`,
+      id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
       name: newClipName.trim() || `${newClipCategory}`,
       category: newClipCategory,
       color: catObj?.color || '#cc2016',
-      startTime: pendingClipRange.start,
-      endTime: pendingClipRange.end,
+      startTime: Number(pendingClipRange.start.toFixed(1)),
+      endTime: Number(Math.max(pendingClipRange.start + 0.5, pendingClipRange.end).toFixed(1)),
       videoId: activeVideo?.id || 'sin-video',
       videoName: activeVideo?.name || 'Registro Directo',
       team: newClipTeam,
-      player: newClipPlayer || undefined,
+      player: newClipPlayer.trim() || undefined,
       zone: selectedPitchZone,
       half: detectedHalf,
       descriptors: newClipDescriptors,
-      notes: newClipNotes || undefined,
+      notes: newClipNotes.trim() || undefined,
       createdAt: new Date().toISOString(),
     };
 
@@ -1738,49 +1900,39 @@ export default function App() {
     setEvents(nextEvents);
     pushHistory({ events: nextEvents });
     setSelectedEventId(newClip.id);
+    setEditingClipId(null);
     setPendingClipRange(null);
     setNewClipNotes('');
-    notify(`Acción "${newClip.name}" clasificada y agrupada en ${newClip.category}`);
+    const outLabel =
+      getClipOutcome(newClip.descriptors) === 'positivo'
+        ? 'Positivo'
+        : getClipOutcome(newClip.descriptors) === 'negativo'
+        ? 'Negativo'
+        : 'Neutro';
+    notify(`Acción "${newClip.name}" guardada (${newClip.player || newClip.team} · ${outLabel})`);
   };
 
   const handleQuickCategoryTag = (cat: TagCategory) => {
     const baseTime = activeTab === 'sin_video' ? liveTimerSeconds : currentTime;
     const pre = duration > 0 && duration <= 20 ? 1.2 : cat.preRoll;
     const post = duration > 0 && duration <= 20 ? 1.5 : cat.postRoll;
-    const start = Math.max(0, baseTime - pre);
-    const end = activeTab === 'sin_video' ? baseTime + post : Math.min(maxTimelineDuration, baseTime + post);
+    const start = Number(Math.max(0, baseTime - pre).toFixed(1));
+    const endRaw = activeTab === 'sin_video' ? baseTime + post : Math.min(maxTimelineDuration, baseTime + post);
+    const end = Number(Math.max(start + 1.2, endRaw).toFixed(1));
 
-    let detectedHalf: '1ª Parte' | '2ª Parte' = liveHalf;
-    if (markers.secondHalfStart !== undefined && start >= markers.secondHalfStart) {
-      detectedHalf = '2ª Parte';
-    } else if (markers.firstHalfStart !== undefined && start >= markers.firstHalfStart) {
-      detectedHalf = '1ª Parte';
+    if (activeTab !== 'sin_video' && videoRef.current && !videoRef.current.paused) {
+      videoRef.current.pause();
+      setIsPlaying(false);
     }
 
-    const newClip: ClipEvent = {
-      id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
-      name: `${cat.name}`,
-      category: cat.name,
-      color: cat.color,
-      startTime: Number(start.toFixed(1)),
-      endTime: Number(Math.max(start + 1.2, end).toFixed(1)),
-      videoId: activeVideo?.id || 'sin-video',
-      videoName: activeVideo?.name || 'Registro Directo',
-      team: selectedTeamFilter,
-      player: selectedPlayerTag || undefined,
-      zone: selectedPitchZone,
-      half: detectedHalf,
-      descriptors: activeDescriptors,
-      createdAt: new Date().toISOString(),
-    };
-
-    const nextEvents = [...events, newClip];
-    setEvents(nextEvents);
-    pushHistory({ events: nextEvents });
-    setSelectedEventId(newClip.id);
-    notify(
-      `Clasificado en "${cat.name}": ${formatTimecode(newClip.startTime)} - ${formatTimecode(newClip.endTime)}`
-    );
+    setEditingClipId(null);
+    setPendingClipRange({ start, end });
+    setNewClipCategory(cat.name);
+    setNewClipName(cat.name);
+    setNewClipTeam(selectedTeamFilter);
+    setNewClipPlayer(selectedPlayerTag);
+    setNewClipDescriptors(activeDescriptors);
+    setNewClipNotes('');
   };
 
   // Filtrado y Agrupación de Eventos según lo clasificado
@@ -1789,9 +1941,10 @@ export default function App() {
       if (filterTeam !== 'ALL' && ev.team !== filterTeam) return false;
       if (filterCategory !== 'ALL' && ev.category !== filterCategory) return false;
       if (filterHalf !== 'ALL' && ev.half !== filterHalf) return false;
+      if (filterOutcome !== 'ALL' && getClipOutcome(ev.descriptors) !== filterOutcome) return false;
       return true;
     });
-  }, [events, filterTeam, filterCategory, filterHalf]);
+  }, [events, filterTeam, filterCategory, filterHalf, filterOutcome, getClipOutcome]);
 
   const groupedEvents = useMemo(() => {
     if (eventsGroupBy === 'none') {
@@ -1815,6 +1968,18 @@ export default function App() {
       } else if (eventsGroupBy === 'player') {
         key = ev.player || 'Jugador Colectivo / No asignado';
         color = '#15181d';
+      } else if (eventsGroupBy === 'outcome') {
+        const out = getClipOutcome(ev.descriptors);
+        if (out === 'positivo') {
+          key = 'Éxito / Positivo';
+          color = '#2e7d32';
+        } else if (out === 'negativo') {
+          key = 'Pérdida / Negativo';
+          color = '#cc2016';
+        } else {
+          key = 'Neutro / Sin calificar';
+          color = '#6b7280';
+        }
       } else if (eventsGroupBy === 'zone') {
         key = ev.zone || 'Zona General';
         color = '#2e7d32';
@@ -1827,7 +1992,7 @@ export default function App() {
     });
 
     return Array.from(map.values());
-  }, [filteredEvents, eventsGroupBy]);
+  }, [filteredEvents, eventsGroupBy, getClipOutcome]);
 
   // Añadir cortes seleccionados o un grupo entero a una Lista de Presentación (Playlist Nacsport)
   const addClipsToActivePlaylist = (clipsToAdd: ClipEvent[]) => {
@@ -1921,7 +2086,7 @@ export default function App() {
           if (freezeImg) {
             ctx.drawImage(freezeImg, 0, 0, width, height);
           } else {
-            ctx.drawImage(videoEl, 0, 0, width, height);
+            drawVideoFrameCropped(ctx, videoEl, width, height);
           }
           drawBanner();
           requestAnimationFrame(holdStep);
@@ -1985,7 +2150,7 @@ export default function App() {
             videoEl.play().catch(() => {});
           }
 
-          ctx.drawImage(videoEl, 0, 0, width, height);
+          drawVideoFrameCropped(ctx, videoEl, width, height);
           const { updatedActions } = stepLivePlayerTracking(
             videoEl,
             drawingsRef.current,
@@ -2661,28 +2826,54 @@ ${xmlInstances}
 
                   {/* Rótulo Televisivo Superior Derecho cuando el vídeo pasa por una acción */}
                   {currentPlayingEvent && (
-                    <div className="absolute top-3 right-3 z-30 flex items-stretch shadow-lg pointer-events-none overflow-hidden border border-black/40">
-                      <div className="bg-[#15181d] text-white font-condensed font-bold text-base px-3 py-1.5 flex items-center">
+                    <div className="absolute top-3 right-3 z-30 flex items-stretch shadow-lg overflow-hidden border border-black/40">
+                      <div className="bg-[#15181d] text-white font-condensed font-bold text-base px-3 py-1.5 flex items-center pointer-events-none">
                         {activeMatchPeriodInfo
                           ? `${activeMatchPeriodInfo.periodLabel} · ${activeMatchPeriodInfo.matchClock}`
                           : formatTimecode(currentPlayingEvent.startTime, false)}
                       </div>
                       <div
                         style={{ backgroundColor: currentPlayingEvent.color || '#cc2016' }}
-                        className="text-white font-condensed font-bold text-base uppercase px-3.5 py-1.5 flex items-center tracking-wide"
+                        className="text-white font-condensed font-bold text-base uppercase px-3.5 py-1.5 flex items-center tracking-wide pointer-events-none"
                       >
                         {currentPlayingEvent.category}
                       </div>
                       <div className="bg-white/95 text-[#15181d] px-3 py-1 flex flex-col justify-center">
-                        <b className="text-xs font-bold leading-tight">
-                          {currentPlayingEvent.name} ({currentPlayingEvent.team})
-                        </b>
+                        <div className="flex items-center gap-1.5">
+                          <b className="text-xs font-bold leading-tight">
+                            {currentPlayingEvent.name} ({currentPlayingEvent.team})
+                          </b>
+                          {getClipOutcome(currentPlayingEvent.descriptors) === 'positivo' && (
+                            <span className="px-1.5 py-0.2 bg-emerald-600 text-white text-[10px] font-condensed font-bold uppercase rounded-sm">
+                              ✓ POSITIVO
+                            </span>
+                          )}
+                          {getClipOutcome(currentPlayingEvent.descriptors) === 'negativo' && (
+                            <span className="px-1.5 py-0.2 bg-red-600 text-white text-[10px] font-condensed font-bold uppercase rounded-sm">
+                              ✕ NEGATIVO
+                            </span>
+                          )}
+                        </div>
                         <span className="text-[10.5px] text-gray-600 leading-tight">
-                          {[currentPlayingEvent.player, ...(currentPlayingEvent.descriptors || [])]
+                          {[
+                            currentPlayingEvent.player || 'Sin jugador específico',
+                            ...(currentPlayingEvent.descriptors || []),
+                          ]
                             .filter(Boolean)
                             .join(' · ')}
                         </span>
                       </div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditClipModal(currentPlayingEvent);
+                        }}
+                        className="bg-[#15181d] hover:bg-[#cc2016] text-[#f5b800] hover:text-white px-2.5 flex items-center gap-1 font-condensed font-bold text-[11px] uppercase transition pointer-events-auto border-l border-white/15"
+                        title="Cambiar quién lo ha hecho y si ha sido positivo o negativo"
+                      >
+                        <Pencil className="w-3 h-3" />
+                        <span>Editar</span>
+                      </button>
                     </div>
                   )}
 
@@ -3477,7 +3668,7 @@ ${xmlInstances}
                       const catEvents = filteredEvents.filter((e) => e.category === cat.name);
                       return (
                         <div key={cat.id} className="flex items-center h-[28px] hover:bg-gray-50/80">
-                          <div className="w-[175px] shrink-0 h-full px-2 border-r border-gray-200 flex items-center gap-1.5 text-xs">
+                          <div className="w-[185px] shrink-0 h-full px-2 border-r border-gray-200 flex items-center gap-1.5 text-xs">
                             <span
                               className="w-2.5 h-2.5 rounded-sm shrink-0"
                               style={{ backgroundColor: cat.color }}
@@ -3485,11 +3676,18 @@ ${xmlInstances}
                             <b
                               onClick={() => handleQuickCategoryTag(cat)}
                               className="truncate font-semibold text-[11px] text-gray-800 cursor-pointer hover:text-[#cc2016]"
-                              title={`Clic para añadir un corte de ${cat.name}`}
+                              title={`Clic para añadir un corte de ${cat.name} (eligiendo quién lo ha hecho y si es positivo o negativo)`}
                             >
                               {cat.name}
                             </b>
-                            <span className="ml-auto text-[10px] text-gray-400 font-mono">{catEvents.length}</span>
+                            <button
+                              onClick={() => handleQuickCategoryTag(cat)}
+                              className="ml-auto px-1 py-0.2 bg-gray-100 hover:bg-[#cc2016] hover:text-white rounded text-[10px] font-bold text-gray-700 transition"
+                              title={`Añadir acción de ${cat.name} (marcar quién lo ha hecho y positivo/negativo)`}
+                            >
+                              +
+                            </button>
+                            <span className="text-[10px] text-gray-400 font-mono">{catEvents.length}</span>
                             {catEvents.length > 0 && (
                               <button
                                 onClick={() => startPlayingClipQueue(catEvents)}
@@ -3516,12 +3714,17 @@ ${xmlInstances}
                             {catEvents.map((ev) => {
                               const leftPct = Math.min(99, (ev.startTime / maxTimelineDuration) * 100);
                               const widthPct = Math.max(1.2, ((ev.endTime - ev.startTime) / maxTimelineDuration) * 100);
+                              const evOutcome = getClipOutcome(ev.descriptors);
                               return (
                                 <div
                                   key={ev.id}
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     activateClipPlayback(ev, { holdManual: true });
+                                  }}
+                                  onDoubleClick={(e) => {
+                                    e.stopPropagation();
+                                    openEditClipModal(ev);
                                   }}
                                   style={{
                                     left: `${leftPct}%`,
@@ -3531,9 +3734,18 @@ ${xmlInstances}
                                   className={`absolute top-1 bottom-1 rounded-sm px-1 text-[10px] font-condensed font-bold text-white flex items-center gap-1 overflow-hidden shadow-sm cursor-pointer ${
                                     selectedEventId === ev.id ? 'ring-2 ring-black z-10' : 'hover:brightness-110'
                                   }`}
-                                  title={`${ev.name} (${ev.team}) | ${formatTimecode(ev.startTime)} - ${formatTimecode(ev.endTime)}`}
+                                  title={`${ev.name} (${ev.team}${ev.player ? ` · ${ev.player}` : ''}) · ${
+                                    evOutcome === 'positivo'
+                                      ? 'POSITIVO'
+                                      : evOutcome === 'negativo'
+                                      ? 'NEGATIVO'
+                                      : 'NEUTRO'
+                                  } | Doble clic para editar`}
                                 >
-                                  <span className="truncate">{ev.team === 'Rival' ? `RIV` : `SÉN`}</span>
+                                  <span className="truncate">
+                                    {evOutcome === 'positivo' ? '✓ ' : evOutcome === 'negativo' ? '✕ ' : ''}
+                                    {ev.player ? ev.player.split('.')[0] : ev.team === 'Rival' ? `RIV` : `SÉN`}
+                                  </span>
                                 </div>
                               );
                             })}
@@ -3710,114 +3922,257 @@ ${xmlInstances}
                 </div>
               )}
 
-              {/* Cuadro emergente al pulsar PUNTO B - FIN con clasificación completa Nacsport */}
+              {/* MODAL EMERGENTE DE CLASIFICACIÓN: ¿QUIÉN LO HA HECHO Y SI HA SIDO POSITIVO O NEGATIVO? */}
               {pendingClipRange && (
-                <div className="bg-white border-2 border-[#cc2016] p-3 rounded shadow-md mb-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-condensed font-bold text-sm uppercase text-[#cc2016]">
-                      CLASIFICAR CORTE NACSPORT ({formatTimecode(pendingClipRange.start)} -{' '}
-                      {formatTimecode(pendingClipRange.end)})
-                    </span>
-                    <button
-                      onClick={() => setPendingClipRange(null)}
-                      className="text-gray-400 hover:text-gray-700"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap gap-1 mb-2">
-                    {tagCategories.map((cat) => (
+                <div className="fixed inset-0 bg-black/65 flex items-center justify-center p-4 z-50">
+                  <div className="bg-white rounded-lg max-w-2xl w-full p-4 shadow-2xl border-t-4 border-[#cc2016] max-h-[92vh] overflow-y-auto">
+                    <div className="flex items-center justify-between pb-2.5 border-b border-gray-200 mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="w-3 h-3 rounded-sm bg-[#cc2016]" />
+                        <h3 className="font-condensed font-bold text-base uppercase text-gray-900">
+                          {editingClipId
+                            ? `EDITAR ACCIÓN (${formatTimecode(pendingClipRange.start)} - ${formatTimecode(
+                                pendingClipRange.end
+                              )})`
+                            : `CLASIFICAR ACCIÓN (${formatTimecode(pendingClipRange.start)} - ${formatTimecode(
+                                pendingClipRange.end
+                              )})`}
+                        </h3>
+                      </div>
                       <button
-                        key={cat.id}
-                        type="button"
                         onClick={() => {
-                          setNewClipCategory(cat.name);
-                          setNewClipName(cat.name);
+                          setPendingClipRange(null);
+                          setEditingClipId(null);
                         }}
-                        style={{
-                          backgroundColor: newClipCategory === cat.name ? cat.color : '#f3f4f6',
-                          color: newClipCategory === cat.name ? '#fff' : '#1f2937',
-                        }}
-                        className="px-2 py-1 text-[11px] font-condensed font-bold uppercase rounded transition"
+                        className="text-gray-400 hover:text-gray-700 p-1"
                       >
-                        {cat.name}
+                        <X className="w-5 h-5" />
                       </button>
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap gap-1 mb-2">
-                    {NACSPORT_DESCRIPTORS.map((desc) => {
-                      const isOn = newClipDescriptors.includes(desc);
-                      return (
+                    </div>
+
+                    {/* 1. ¿HA SIDO POSITIVO O NEGATIVO? */}
+                    <div className="mb-3.5 bg-gray-50 p-3 rounded border border-gray-200">
+                      <label className="block font-condensed font-bold text-xs uppercase text-gray-800 mb-2">
+                        1. ¿HA SIDO POSITIVO O NEGATIVO? (RESULTADO DE LA ACCIÓN)
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
                         <button
-                          key={desc}
                           type="button"
                           onClick={() =>
-                            setNewClipDescriptors((prev) =>
-                              prev.includes(desc) ? prev.filter((d) => d !== desc) : [...prev, desc]
-                            )
+                            setNewClipDescriptors((prev) => applyOutcomeToDescriptors(prev, 'positivo'))
                           }
-                          className={`px-2 py-0.5 text-[10.5px] rounded border transition ${
-                            isOn
-                              ? 'bg-[#15181d] text-[#f5b800] border-[#15181d] font-semibold'
-                              : 'bg-gray-50 text-gray-600 border-gray-300'
+                          className={`py-2.5 px-3 rounded font-condensed font-bold text-sm uppercase flex items-center justify-center gap-1.5 border-2 transition shadow-sm ${
+                            getClipOutcome(newClipDescriptors) === 'positivo'
+                              ? 'bg-emerald-600 text-white border-emerald-700 ring-2 ring-emerald-300'
+                              : 'bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-50'
                           }`}
                         >
-                          {desc}
+                          <Check className="w-4 h-4 stroke-[3]" />
+                          <span>POSITIVO / ÉXITO</span>
                         </button>
-                      );
-                    })}
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-2">
-                    <input
-                      type="text"
-                      value={newClipName}
-                      onChange={(e) => setNewClipName(e.target.value)}
-                      placeholder="Nombre del evento (ej: Presión alta y robo)"
-                      className="sm:col-span-2 border border-gray-300 px-2.5 py-1.5 text-xs rounded focus:outline-none focus:border-[#cc2016]"
-                      autoFocus
-                    />
-                    <select
-                      value={newClipPlayer}
-                      onChange={(e) => setNewClipPlayer(e.target.value)}
-                      className="border border-gray-300 px-2 py-1.5 text-xs rounded bg-white"
-                    >
-                      <option value="">-- Jugador (Opcional) --</option>
-                      {SENECA_PLAYERS.map((p) => (
-                        <option key={p} value={p}>
-                          {p}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={newClipTeam}
-                      onChange={(e) => setNewClipTeam(e.target.value as 'Séneca CF' | 'Rival')}
-                      className="border border-gray-300 px-2 py-1.5 text-xs rounded bg-white font-semibold"
-                    >
-                      <option value="Séneca CF">Séneca CF</option>
-                      <option value="Rival">Rival ({rivalName})</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <input
-                      type="text"
-                      value={newClipNotes}
-                      onChange={(e) => setNewClipNotes(e.target.value)}
-                      placeholder="Notas tácticas opcionales..."
-                      className="flex-1 border border-gray-300 px-2.5 py-1 text-xs rounded"
-                    />
-                    <button
-                      onClick={confirmSavePendingClip}
-                      className="px-4 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase tracking-wider rounded"
-                    >
-                      CLASIFICAR Y GUARDAR CORTE
-                    </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setNewClipDescriptors((prev) => applyOutcomeToDescriptors(prev, 'negativo'))
+                          }
+                          className={`py-2.5 px-3 rounded font-condensed font-bold text-sm uppercase flex items-center justify-center gap-1.5 border-2 transition shadow-sm ${
+                            getClipOutcome(newClipDescriptors) === 'negativo'
+                              ? 'bg-[#cc2016] text-white border-red-800 ring-2 ring-red-300'
+                              : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
+                          }`}
+                        >
+                          <X className="w-4 h-4 stroke-[3]" />
+                          <span>NEGATIVO / FALLO</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setNewClipDescriptors((prev) => applyOutcomeToDescriptors(prev, 'neutro'))
+                          }
+                          className={`py-2.5 px-3 rounded font-condensed font-bold text-sm uppercase flex items-center justify-center gap-1.5 border-2 transition ${
+                            getClipOutcome(newClipDescriptors) === 'neutro'
+                              ? 'bg-gray-800 text-white border-gray-900'
+                              : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100'
+                          }`}
+                        >
+                          <span>➖ NEUTRO / SIN MARCAR</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 2. ¿QUIÉN LO HA HECHO? (EQUIPO Y JUGADOR / DORSAL) */}
+                    <div className="mb-3.5 bg-gray-50 p-3 rounded border border-gray-200">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                        <label className="font-condensed font-bold text-xs uppercase text-gray-800">
+                          2. ¿QUIÉN LO HA HECHO? (EQUIPO Y JUGADOR / DORSAL)
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setNewClipTeam('Séneca CF')}
+                            className={`px-3 py-1 rounded text-xs font-condensed font-bold uppercase transition ${
+                              newClipTeam === 'Séneca CF'
+                                ? 'bg-[#cc2016] text-white shadow-sm'
+                                : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            Séneca CF
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setNewClipTeam('Rival')}
+                            className={`px-3 py-1 rounded text-xs font-condensed font-bold uppercase transition ${
+                              newClipTeam === 'Rival'
+                                ? 'bg-[#1666c0] text-white shadow-sm'
+                                : 'bg-white border border-gray-300 text-gray-700 hover:bg-gray-100'
+                            }`}
+                          >
+                            Rival ({rivalName})
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="mb-2">
+                        <input
+                          type="text"
+                          value={newClipPlayer}
+                          onChange={(e) => setNewClipPlayer(e.target.value)}
+                          placeholder="Escribe aquí el nombre o dorsal de quien lo ha hecho (ej: 7. Juanlu, 9. Carlos...) o elige abajo"
+                          className="w-full border border-gray-300 px-2.5 py-1.5 text-xs rounded bg-white focus:outline-none focus:border-[#cc2016] font-medium"
+                        />
+                      </div>
+
+                      <div className="flex flex-wrap gap-1 max-h-[120px] overflow-y-auto">
+                        <button
+                          type="button"
+                          onClick={() => setNewClipPlayer('')}
+                          className={`px-2 py-1 text-[11px] rounded border transition ${
+                            newClipPlayer === ''
+                              ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
+                              : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                          }`}
+                        >
+                          Equipo / Colectivo (Sin jugador)
+                        </button>
+                        {allAvailablePlayers.map((p) => (
+                          <button
+                            key={p}
+                            type="button"
+                            onClick={() => setNewClipPlayer(p)}
+                            className={`px-2 py-1 text-[11px] rounded border transition ${
+                              newClipPlayer === p
+                                ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
+                                : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 3. CATEGORÍA Y DESCRIPTORES ADICIONALES */}
+                    <div className="mb-3">
+                      <label className="block font-condensed font-bold text-xs uppercase text-gray-700 mb-1.5">
+                        3. CATEGORÍA DE LA ACCIÓN
+                      </label>
+                      <div className="flex flex-wrap gap-1 mb-2.5">
+                        {tagCategories.map((cat) => (
+                          <button
+                            key={cat.id}
+                            type="button"
+                            onClick={() => {
+                              setNewClipCategory(cat.name);
+                              if (!newClipName || tagCategories.some((c) => c.name === newClipName)) {
+                                setNewClipName(cat.name);
+                              }
+                            }}
+                            style={{
+                              backgroundColor: newClipCategory === cat.name ? cat.color : '#f3f4f6',
+                              color: newClipCategory === cat.name ? '#fff' : '#1f2937',
+                            }}
+                            className="px-2 py-1 text-[11px] font-condensed font-bold uppercase rounded transition"
+                          >
+                            {cat.name}
+                          </button>
+                        ))}
+                      </div>
+
+                      <label className="block font-condensed font-bold text-xs uppercase text-gray-700 mb-1">
+                        DESCRIPTORES TÁCTICOS EXTRA (OPCIONAL)
+                      </label>
+                      <div className="flex flex-wrap gap-1 mb-2.5">
+                        {NACSPORT_DESCRIPTORS.filter(
+                          (d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo'
+                        ).map((desc) => {
+                          const isOn = newClipDescriptors.includes(desc);
+                          return (
+                            <button
+                              key={desc}
+                              type="button"
+                              onClick={() =>
+                                setNewClipDescriptors((prev) =>
+                                  prev.includes(desc) ? prev.filter((d) => d !== desc) : [...prev, desc]
+                                )
+                              }
+                              className={`px-2 py-0.5 text-[10.5px] rounded border transition ${
+                                isOn
+                                  ? 'bg-[#15181d] text-[#f5b800] border-[#15181d] font-semibold'
+                                  : 'bg-gray-50 text-gray-600 border-gray-300'
+                              }`}
+                            >
+                              {desc}
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={newClipName}
+                          onChange={(e) => setNewClipName(e.target.value)}
+                          placeholder="Título del corte (ej: Tiro cruzado)"
+                          className="border border-gray-300 px-2.5 py-1.5 text-xs rounded focus:outline-none focus:border-[#cc2016]"
+                        />
+                        <input
+                          type="text"
+                          value={newClipNotes}
+                          onChange={(e) => setNewClipNotes(e.target.value)}
+                          placeholder="Notas tácticas opcionales..."
+                          className="border border-gray-300 px-2.5 py-1.5 text-xs rounded focus:outline-none focus:border-[#cc2016]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-gray-200">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPendingClipRange(null);
+                          setEditingClipId(null);
+                        }}
+                        className="px-3.5 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 font-condensed font-bold text-xs uppercase rounded"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={confirmSavePendingClip}
+                        className="px-5 py-2 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-sm uppercase tracking-wider rounded shadow"
+                      >
+                        {editingClipId ? '✓ GUARDAR CAMBIOS' : '✓ GUARDAR ACCIÓN'}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
             </div>
 
-            <div className="pt-2 border-t border-gray-200 flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-5">
+            <div className="pt-2 border-t border-gray-200 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-4">
                 <span className="font-condensed font-bold text-[15px] text-gray-700">
                   {formatTimecode(activeTime)} / {formatTimecode(maxTimelineDuration, false)}
                 </span>
@@ -3827,32 +4182,98 @@ ${xmlInstances}
               </div>
 
               {selectedEvent ? (
-                <div className="flex flex-wrap items-center gap-2 text-xs bg-white px-3 py-1 border border-gray-300 rounded">
+                <div className="flex flex-wrap items-center gap-1.5 text-xs bg-white px-2.5 py-1 border border-gray-300 rounded shadow-sm">
                   <span
-                    className="w-2.5 h-2.5 rounded-full inline-block"
+                    className="w-2.5 h-2.5 rounded-full inline-block shrink-0"
                     style={{ backgroundColor: selectedEvent.color }}
                   />
                   <strong className="text-gray-900">{selectedEvent.name}</strong>
-                  <span className="text-gray-500">
+                  <span className="text-gray-500 text-[11px]">
                     ({formatTimecode(selectedEvent.startTime)} - {formatTimecode(selectedEvent.endTime)})
                   </span>
-                  {selectedEvent.half && (
-                    <span className="bg-blue-50 text-blue-800 px-2 py-0.5 rounded font-semibold">
-                      {selectedEvent.half}
-                    </span>
-                  )}
-                  <span className="bg-gray-100 px-2 py-0.5 rounded text-gray-700 font-medium">
-                    {selectedEvent.team}
-                  </span>
-                  {(selectedEvent.descriptors || []).map((d) => (
-                    <span key={d} className="bg-amber-50 text-amber-900 px-1.5 py-0.5 rounded text-[11px]">
-                      {d}
-                    </span>
-                  ))}
+
+                  {/* Selector rápido de Equipo */}
+                  <select
+                    value={selectedEvent.team}
+                    onChange={(e) =>
+                      updateExistingClip(selectedEvent.id, {
+                        team: e.target.value as 'Séneca CF' | 'Rival',
+                      })
+                    }
+                    className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-gray-50"
+                    title="Cambiar equipo que realiza la acción"
+                  >
+                    <option value="Séneca CF">Séneca CF</option>
+                    <option value="Rival">Rival ({rivalName})</option>
+                  </select>
+
+                  {/* Selector rápido de Quién lo ha hecho (Jugador) */}
+                  <select
+                    value={selectedEvent.player || ''}
+                    onChange={(e) =>
+                      updateExistingClip(selectedEvent.id, {
+                        player: e.target.value || undefined,
+                      })
+                    }
+                    className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] bg-gray-50 text-gray-800"
+                    title="Marcar quién ha hecho esta acción"
+                  >
+                    <option value="">-- Quién lo ha hecho (Colectivo) --</option>
+                    {selectedEvent.player &&
+                      !allAvailablePlayers.includes(selectedEvent.player) && (
+                        <option value={selectedEvent.player}>{selectedEvent.player}</option>
+                      )}
+                    {allAvailablePlayers.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+
+                  {/* Botones rápidos Positivo / Negativo */}
+                  <button
+                    onClick={() =>
+                      updateExistingClip(selectedEvent.id, {
+                        descriptors: applyOutcomeToDescriptors(selectedEvent.descriptors, 'positivo'),
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
+                      getClipOutcome(selectedEvent.descriptors) === 'positivo'
+                        ? 'bg-emerald-600 text-white border-emerald-700'
+                        : 'bg-gray-50 text-emerald-700 border-gray-300 hover:bg-emerald-50'
+                    }`}
+                    title="Marcar acción como Positiva / Éxito"
+                  >
+                    ✓ Positivo
+                  </button>
+                  <button
+                    onClick={() =>
+                      updateExistingClip(selectedEvent.id, {
+                        descriptors: applyOutcomeToDescriptors(selectedEvent.descriptors, 'negativo'),
+                      })
+                    }
+                    className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
+                      getClipOutcome(selectedEvent.descriptors) === 'negativo'
+                        ? 'bg-[#cc2016] text-white border-red-800'
+                        : 'bg-gray-50 text-red-700 border-gray-300 hover:bg-red-50'
+                    }`}
+                    title="Marcar acción como Negativa / Fallo"
+                  >
+                    ✕ Negativo
+                  </button>
+
+                  <button
+                    onClick={() => openEditClipModal(selectedEvent)}
+                    className="px-2 py-0.5 bg-[#15181d] hover:bg-[#cc2016] text-[#f5b800] hover:text-white rounded font-condensed font-bold text-[11px] uppercase flex items-center gap-1 transition"
+                    title="Abrir ventana para editar jugador, nombre y resultado"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    <span>Editar</span>
+                  </button>
                 </div>
               ) : (
                 <span className="text-xs text-gray-400">
-                  Selecciona cualquier corte o grupo para reproducir o exportar
+                  Selecciona cualquier corte o grupo para reproducir o editar quién lo ha hecho y si es positivo/negativo
                 </span>
               )}
             </div>
@@ -4028,24 +4449,35 @@ ${xmlInstances}
                           className="border border-gray-300 bg-white px-2 py-1 text-xs font-semibold text-gray-900 rounded-none focus:outline-none focus:border-[#cc2016]"
                         >
                           <option value="category">Categoría / Acción clasificada</option>
+                          <option value="player">Quién lo ha hecho (Jugador / Dorsal)</option>
+                          <option value="outcome">Resultado (Positivo / Negativo)</option>
                           <option value="team">Equipo (Séneca CF / Rival)</option>
                           <option value="half">Periodo (1ª Parte / 2ª Parte)</option>
-                          <option value="player">Jugador / Dorsal</option>
                           <option value="zone">Zona del Campo</option>
                           <option value="none">Sin agrupar (Orden cronológico)</option>
                         </select>
                       </div>
 
                       {/* Filtros combinados rápidos */}
-                      <div className="grid grid-cols-3 gap-1">
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
                         <select
                           value={filterTeam}
                           onChange={(e) => setFilterTeam(e.target.value as any)}
                           className="border border-gray-300 bg-white px-1.5 py-1 text-[11px]"
                         >
-                          <option value="ALL">Todos los equipos</option>
+                          <option value="ALL">Todos equipos</option>
                           <option value="Séneca CF">Séneca CF</option>
                           <option value="Rival">Rival</option>
+                        </select>
+
+                        <select
+                          value={filterOutcome}
+                          onChange={(e) => setFilterOutcome(e.target.value as any)}
+                          className="border border-gray-300 bg-white px-1.5 py-1 text-[11px] font-semibold"
+                        >
+                          <option value="ALL">Positivo y Negativo</option>
+                          <option value="positivo">✓ Solo Positivos</option>
+                          <option value="negativo">✕ Solo Negativos</option>
                         </select>
 
                         <select
@@ -4063,7 +4495,7 @@ ${xmlInstances}
                           onChange={(e) => setFilterCategory(e.target.value)}
                           className="border border-gray-300 bg-white px-1.5 py-1 text-[11px]"
                         >
-                          <option value="ALL">Todas las acciones</option>
+                          <option value="ALL">Todas acciones</option>
                           {tagCategories.map((c) => (
                             <option key={c.id} value={c.name}>
                               {c.name}
@@ -4207,94 +4639,154 @@ ${xmlInstances}
                                 <div className="divide-y divide-gray-100 bg-white">
                                   {grp.items.map((ev, index) => {
                                     const isChecked = checkedClipIds.includes(ev.id);
+                                    const evOutcome = getClipOutcome(ev.descriptors);
                                     return (
                                       <div
                                         key={ev.id}
                                         onClick={() => {
                                           activateClipPlayback(ev, { holdManual: true });
                                         }}
-                                        className={`p-1.5 text-xs cursor-pointer transition flex items-center justify-between ${
+                                        className={`p-1.5 text-xs cursor-pointer transition flex flex-col gap-1 ${
                                           selectedEventId === ev.id ? 'bg-amber-50/80' : 'hover:bg-gray-50'
                                         }`}
                                       >
-                                        <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setCheckedClipIds((prev) =>
-                                                prev.includes(ev.id)
-                                                  ? prev.filter((id) => id !== ev.id)
-                                                  : [...prev, ev.id]
-                                              );
-                                            }}
-                                            className="text-gray-400 hover:text-[#cc2016]"
-                                          >
-                                            {isChecked ? (
-                                              <CheckSquare className="w-3.5 h-3.5 text-[#cc2016]" />
-                                            ) : (
-                                              <Square className="w-3.5 h-3.5" />
-                                            )}
-                                          </button>
-                                          <div className="min-w-0 flex-1">
-                                            <div className="font-semibold text-gray-900 truncate flex items-center gap-1">
-                                              <span>
-                                                {index + 1}. {ev.name}
-                                              </span>
-                                              {ev.half && (
-                                                <span className="text-[9.5px] px-1 bg-gray-100 text-gray-600 rounded">
-                                                  {ev.half}
-                                                </span>
+                                        <div className="flex items-center justify-between">
+                                          <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setCheckedClipIds((prev) =>
+                                                  prev.includes(ev.id)
+                                                    ? prev.filter((id) => id !== ev.id)
+                                                    : [...prev, ev.id]
+                                                );
+                                              }}
+                                              className="text-gray-400 hover:text-[#cc2016]"
+                                            >
+                                              {isChecked ? (
+                                                <CheckSquare className="w-3.5 h-3.5 text-[#cc2016]" />
+                                              ) : (
+                                                <Square className="w-3.5 h-3.5" />
                                               )}
+                                            </button>
+                                            <div className="min-w-0 flex-1">
+                                              <div className="font-semibold text-gray-900 truncate flex items-center gap-1">
+                                                <span className="truncate">
+                                                  {index + 1}. {ev.name}
+                                                </span>
+                                                {ev.half && (
+                                                  <span className="text-[9.5px] px-1 bg-gray-100 text-gray-600 rounded shrink-0">
+                                                    {ev.half}
+                                                  </span>
+                                                )}
+                                                {evOutcome === 'positivo' && (
+                                                  <span className="text-[9px] px-1.5 py-0.2 bg-emerald-600 text-white rounded font-condensed font-bold uppercase shrink-0">
+                                                    ✓ Positivo
+                                                  </span>
+                                                )}
+                                                {evOutcome === 'negativo' && (
+                                                  <span className="text-[9px] px-1.5 py-0.2 bg-[#cc2016] text-white rounded font-condensed font-bold uppercase shrink-0">
+                                                    ✕ Negativo
+                                                  </span>
+                                                )}
+                                              </div>
+                                              <div className="text-[10.5px] text-gray-500 flex flex-wrap items-center gap-1.5">
+                                                <span className="font-mono text-[#cc2016] font-semibold">
+                                                  {formatTimecode(ev.startTime)} - {formatTimecode(ev.endTime)}
+                                                </span>
+                                                <span>({(ev.endTime - ev.startTime).toFixed(1)}s)</span>
+                                                <span>· {ev.team}</span>
+                                              </div>
                                             </div>
-                                            <div className="text-[10.5px] text-gray-500 flex flex-wrap items-center gap-1.5">
-                                              <span className="font-mono text-[#cc2016] font-semibold">
-                                                {formatTimecode(ev.startTime)} - {formatTimecode(ev.endTime)}
-                                              </span>
-                                              <span>({(ev.endTime - ev.startTime).toFixed(1)}s)</span>
-                                              <span>· {ev.team}</span>
-                                              {ev.player && <span className="text-gray-700">· {ev.player}</span>}
-                                            </div>
+                                          </div>
+
+                                          <div className="flex items-center gap-0.5 shrink-0">
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                addClipsToActivePlaylist([ev]);
+                                              }}
+                                              className="p-1 text-gray-400 hover:text-[#1666c0]"
+                                              title="Añadir a lista de presentación"
+                                            >
+                                              <Plus className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                openEditClipModal(ev);
+                                              }}
+                                              className="p-1 text-gray-500 hover:text-[#cc2016]"
+                                              title="Editar quién lo ha hecho, si es positivo/negativo y categoría"
+                                            >
+                                              <Pencil className="w-3.5 h-3.5" />
+                                            </button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                const filtered = events.filter((item) => item.id !== ev.id);
+                                                setEvents(filtered);
+                                                pushHistory({ events: filtered });
+                                              }}
+                                              className="p-1 text-gray-400 hover:text-red-600"
+                                            >
+                                              <Trash2 className="w-3.5 h-3.5" />
+                                            </button>
                                           </div>
                                         </div>
 
-                                        <div className="flex items-center gap-0.5">
+                                        {/* Barra rápida en cada corte para cambiar QUIÉN LO HA HECHO y POSITIVO / NEGATIVO */}
+                                        <div className="flex flex-wrap items-center justify-between gap-1 pl-5 pt-0.5 border-t border-gray-100">
                                           <button
                                             onClick={(e) => {
                                               e.stopPropagation();
-                                              addClipsToActivePlaylist([ev]);
+                                              openEditClipModal(ev);
                                             }}
-                                            className="p-1 text-gray-400 hover:text-[#1666c0]"
-                                            title="Añadir a lista de presentación"
+                                            className={`px-2 py-0.5 rounded text-[10.5px] border flex items-center gap-1 transition ${
+                                              ev.player
+                                                ? 'bg-gray-100 text-gray-800 border-gray-300 font-semibold hover:bg-gray-200'
+                                                : 'bg-amber-50 text-amber-900 border-amber-300 font-semibold hover:bg-amber-100'
+                                            }`}
+                                            title="Haz clic para elegir o cambiar quién ha hecho esta acción"
                                           >
-                                            <Plus className="w-3.5 h-3.5" />
+                                            <Users className="w-2.5 h-2.5 text-[#cc2016]" />
+                                            <span>{ev.player ? ev.player : '+ Poner quién lo ha hecho'}</span>
                                           </button>
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              const edited = window.prompt('Editar nombre del evento:', ev.name);
-                                              if (edited && edited.trim()) {
-                                                const updated = events.map((item) =>
-                                                  item.id === ev.id ? { ...item, name: edited.trim() } : item
-                                                );
-                                                setEvents(updated);
-                                                pushHistory({ events: updated });
-                                              }
-                                            }}
-                                            className="p-1 text-gray-400 hover:text-gray-700"
-                                          >
-                                            <Pencil className="w-3.5 h-3.5" />
-                                          </button>
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              const filtered = events.filter((item) => item.id !== ev.id);
-                                              setEvents(filtered);
-                                              pushHistory({ events: filtered });
-                                            }}
-                                            className="p-1 text-gray-400 hover:text-red-600"
-                                          >
-                                            <Trash2 className="w-3.5 h-3.5" />
-                                          </button>
+
+                                          <div className="flex items-center gap-1">
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                updateExistingClip(ev.id, {
+                                                  descriptors: applyOutcomeToDescriptors(ev.descriptors, 'positivo'),
+                                                });
+                                              }}
+                                              className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
+                                                evOutcome === 'positivo'
+                                                  ? 'bg-emerald-600 text-white border-emerald-700'
+                                                  : 'bg-white text-emerald-700 border-gray-300 hover:bg-emerald-50'
+                                              }`}
+                                              title="Marcar como Positivo / Éxito"
+                                            >
+                                              ✓ Positivo
+                                            </button>
+                                            <button
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                updateExistingClip(ev.id, {
+                                                  descriptors: applyOutcomeToDescriptors(ev.descriptors, 'negativo'),
+                                                });
+                                              }}
+                                              className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
+                                                evOutcome === 'negativo'
+                                                  ? 'bg-[#cc2016] text-white border-red-800'
+                                                  : 'bg-white text-red-700 border-gray-300 hover:bg-red-50'
+                                              }`}
+                                              title="Marcar como Negativo / Fallo"
+                                            >
+                                              ✕ Negativo
+                                            </button>
+                                          </div>
                                         </div>
                                       </div>
                                     );
@@ -5368,7 +5860,8 @@ ${xmlInstances}
                     <th className="p-2.5 text-center border border-gray-700 bg-[#a81810]">Séneca CF (2ª P)</th>
                     <th className="p-2.5 text-center border border-gray-700 bg-[#1666c0]">Rival (1ª P)</th>
                     <th className="p-2.5 text-center border border-gray-700 bg-[#114f96]">Rival (2ª P)</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-emerald-800">Éxito / Positivo</th>
+                    <th className="p-2.5 text-center border border-gray-700 bg-emerald-800">✓ Positivo</th>
+                    <th className="p-2.5 text-center border border-gray-700 bg-red-800">✕ Negativo</th>
                     <th className="p-2.5 text-center border border-gray-700">TOTAL GRUPO</th>
                   </tr>
                 </thead>
@@ -5379,7 +5872,8 @@ ${xmlInstances}
                     const sen2 = allCat.filter((e) => e.team === 'Séneca CF' && e.half === '2ª Parte');
                     const riv1 = allCat.filter((e) => e.team === 'Rival' && (e.half || '1ª Parte') === '1ª Parte');
                     const riv2 = allCat.filter((e) => e.team === 'Rival' && e.half === '2ª Parte');
-                    const exito = allCat.filter((e) => (e.descriptors || []).includes('Éxito / Positivo'));
+                    const exito = allCat.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
+                    const fallo = allCat.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
 
                     const renderCell = (clips: ClipEvent[], badgeColor: string) => (
                       <td className="p-2 border border-gray-200 text-center">
@@ -5413,6 +5907,7 @@ ${xmlInstances}
                         {renderCell(riv1, '#1666c0')}
                         {renderCell(riv2, '#114f96')}
                         {renderCell(exito, '#2e7d32')}
+                        {renderCell(fallo, '#b91c1c')}
                         <td className="p-2 border border-gray-200 text-center bg-gray-50">
                           {allCat.length > 0 ? (
                             <div className="flex items-center justify-center gap-1">
