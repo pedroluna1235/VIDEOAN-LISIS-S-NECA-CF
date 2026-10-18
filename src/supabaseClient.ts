@@ -79,6 +79,12 @@ export type PintadoToolType =
   | 'klip_radar' // Anillo 3D con radar animado estilo KlipDraw
   | 'klip_sombra'; // Bloqueo / Sombra de cobertura defensiva
 
+export interface DrawingKeyframe {
+  time: number;
+  points: { x: number; y: number }[];
+  manual?: boolean;
+}
+
 export interface DrawingAction {
   id: string;
   tool: PintadoToolType;
@@ -96,6 +102,8 @@ export interface DrawingAction {
   dorsal?: string;
   timestamp: number; // Segundo del vídeo en el que se creó
   closed?: boolean;
+  trackPlayers?: boolean; // Si true (por defecto), los puntos siguen a los jugadores marcados cuando corre el vídeo
+  keyframes?: DrawingKeyframe[]; // Trayectoria temporal de seguimiento de jugadores (automático + manual)
 }
 
 export interface RosterPlayerItem {

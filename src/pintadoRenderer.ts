@@ -1,4 +1,5 @@
 import { DrawingAction } from './supabaseClient';
+import { getInterpolatedPointsAtTime, isRigidRadiusTool } from './playerTracker';
 
 function hexToRgba(hex: string, alpha: number): string {
   const clean = hex.replace('#', '');
@@ -9,7 +10,10 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-export function getDrawingBoundingBox(action: DrawingAction): {
+export function getDrawingBoundingBox(
+  action: DrawingAction,
+  currentTime?: number
+): {
   cx: number;
   cy: number;
   minX: number;
@@ -17,11 +21,13 @@ export function getDrawingBoundingBox(action: DrawingAction): {
   maxX: number;
   maxY: number;
 } {
-  if (!action.points || action.points.length === 0) {
+  const pts =
+    currentTime !== undefined ? getInterpolatedPointsAtTime(action, currentTime) : action.points;
+  if (!pts || pts.length === 0) {
     return { cx: 0, cy: 0, minX: 0, minY: 0, maxX: 0, maxY: 0 };
   }
-  const xs = action.points.map((p) => p.x);
-  const ys = action.points.map((p) => p.y);
+  const xs = pts.map((p) => p.x);
+  const ys = pts.map((p) => p.y);
   let minX = Math.min(...xs);
   let maxX = Math.max(...xs);
   let minY = Math.min(...ys);
@@ -39,10 +45,16 @@ export function getDrawingBoundingBox(action: DrawingAction): {
     maxX += pad;
     minY -= pad;
     maxY += pad;
-  } else if (action.tool === 'circulo' || action.tool === 'zona_elipse' || action.tool === 'lupa') {
-    const start = action.points[0];
-    const end = action.points[action.points.length - 1];
-    const r = Math.max(25, Math.hypot(end.x - start.x, end.y - start.y));
+  } else if (
+    action.tool === 'circulo' ||
+    action.tool === 'zona_elipse' ||
+    action.tool === 'lupa' ||
+    action.tool === 'foco' ||
+    action.tool === 'klip_radar'
+  ) {
+    const start = pts[0];
+    const end = pts[pts.length - 1];
+    const r = Math.max(30, Math.hypot(end.x - start.x, end.y - start.y));
     minX = start.x - r;
     maxX = start.x + r;
     minY = start.y - r;
@@ -54,8 +66,37 @@ export function getDrawingBoundingBox(action: DrawingAction): {
   return { cx, cy, minX: minX - 10, minY: minY - 10, maxX: maxX + 10, maxY: maxY + 10 };
 }
 
-export function hitTestDrawing(action: DrawingAction, pt: { x: number; y: number }): boolean {
-  const box = getDrawingBoundingBox(action);
+/**
+ * Devuelve el índice del nodo/jugador sobre el que se hizo clic (o -1 si no se tocó un nodo individual)
+ */
+export function hitTestDrawingPointIndex(
+  action: DrawingAction,
+  pt: { x: number; y: number },
+  currentTime?: number
+): number {
+  const pts =
+    currentTime !== undefined ? getInterpolatedPointsAtTime(action, currentTime) : action.points;
+  if (!pts || pts.length === 0) return -1;
+  // En trazos libres con decenas de puntos no seleccionamos vértices individuales
+  if (action.tool === 'flecha_libre' || action.tool === 'klip_tracking') return -1;
+
+  const hitRadius = 24;
+  for (let i = 0; i < pts.length; i++) {
+    const d = Math.hypot(pt.x - pts[i].x, pt.y - pts[i].y);
+    if (d <= hitRadius) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+export function hitTestDrawing(
+  action: DrawingAction,
+  pt: { x: number; y: number },
+  currentTime?: number
+): boolean {
+  if (hitTestDrawingPointIndex(action, pt, currentTime) !== -1) return true;
+  const box = getDrawingBoundingBox(action, currentTime);
   return pt.x >= box.minX - 14 && pt.x <= box.maxX + 14 && pt.y >= box.minY - 14 && pt.y <= box.maxY + 14;
 }
 
@@ -102,12 +143,15 @@ export function renderDrawingActions(
       }
     }
 
+    const pts = getInterpolatedPointsAtTime(action, currentTime);
+    if (!pts || pts.length === 0) return;
+
     ctx.save();
     const alpha = Math.max(0.1, Math.min(1, (action.opacity ?? 100) / 100));
     const scaleFactor = Math.max(0.4, (action.scale ?? 100) / 100);
     const strokeW = Math.max(1.5, (action.lineWidth || 4) * scaleFactor);
 
-    const box = getDrawingBoundingBox(action);
+    const box = getDrawingBoundingBox(action, currentTime);
     if (action.rotation && action.rotation !== 0) {
       ctx.translate(box.cx, box.cy);
       ctx.rotate((action.rotation * Math.PI) / 180);
@@ -127,7 +171,6 @@ export function renderDrawingActions(
       ctx.setLineDash([]);
     }
 
-    const pts = action.points;
     const start = pts[0];
     const end = pts[pts.length - 1];
     const headLen = Math.max(14, strokeW * 3.8);
@@ -720,6 +763,20 @@ export function renderDrawingActions(
         ctx.lineWidth = 1.5;
         ctx.strokeRect(c.x - 4, c.y - 4, 8, 8);
       });
+
+      // Nodos individuales de jugadores arrastrables (para Conector, Foco, Triángulo, Distancia, etc.)
+      if (action.tool !== 'flecha_libre' && action.tool !== 'klip_tracking') {
+        const handlePts = isRigidRadiusTool(action.tool) ? [pts[0], pts[pts.length - 1]] : pts;
+        handlePts.forEach((hp, hIdx) => {
+          ctx.beginPath();
+          ctx.arc(hp.x, hp.y, hIdx === 0 || !isRigidRadiusTool(action.tool) ? 7 : 5, 0, Math.PI * 2);
+          ctx.fillStyle = hIdx === 0 || !isRigidRadiusTool(action.tool) ? '#f5b800' : '#1666c0';
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = '#141414';
+          ctx.stroke();
+        });
+      }
     }
 
     ctx.restore();
