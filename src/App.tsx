@@ -4097,26 +4097,6 @@ ${xmlInstances}
                 </div>
               )}
 
-              {/* Botón Abrir Botonera a Pantalla Completa */}
-              <button
-                onClick={() => enterBotoneraFullscreen()}
-                className="h-[34px] px-3.5 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition shadow-md ring-2 ring-red-500/50"
-                title="Abrir la Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
-              >
-                <Maximize2 className="w-4 h-4" />
-                <span>⚡ BOTONERA PANTALLA COMPLETA</span>
-              </button>
-
-              {/* Botón Crear / Personalizar Botonera */}
-              <button
-                onClick={() => setShowBotoneraBuilderModal(true)}
-                className="h-[34px] px-3 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 rounded text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition shadow-md"
-                title="Crear y Personalizar Botonera como en Nacsport"
-              >
-                <Sliders className="w-4 h-4 text-black" />
-                <span>🛠 CREAR BOTONERA</span>
-              </button>
-
               {/* Botón Matriz de Datos Cruzados estilo Nacsport */}
               <button
                 onClick={() => setShowMatrixModal(true)}
@@ -4179,15 +4159,6 @@ ${xmlInstances}
                 </button>
               </div>
 
-              {supabaseStatus === 'local_only' && (
-                <button
-                  onClick={() => setShowSqlModal(true)}
-                  className="h-[32px] px-2 bg-[#cc2016]/20 hover:bg-[#cc2016]/40 border border-[#cc2016] text-[#f5b800] rounded text-[11px] font-semibold flex items-center gap-1"
-                >
-                  <span>SQL Supabase</span>
-                </button>
-              )}
-
               <button
                 onClick={handleUndo}
                 className="w-[32px] h-[32px] flex items-center justify-center border border-[#444] bg-[#222] hover:bg-[#333] text-gray-200"
@@ -4206,46 +4177,24 @@ ${xmlInstances}
           </header>
 
           {/* =====================================================================
-              SEGUNDA BARRA (VERSIÓN GRATUITA, Limpiar proyecto, INSTALAR APP)
-             ===================================================================== */}
-          <div className="h-[46px] bg-[#1e1e1e] text-white flex items-center justify-between px-3 border-b-2 border-[#cc2016] shrink-0">
-            <div className="flex items-center gap-2">
-              <div className="px-4 py-1.5 border border-[#cc2016] bg-[#141414] font-condensed font-bold text-[14px] tracking-wider uppercase text-white flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-[#f5b800]"></span>
-                VERSIÓN GRATUITA
+          {/* Banner discreto si se reproduce una cola de cortes */}
+          {playingQueue && (
+            <div className="bg-[#cc2016] text-white px-3 py-1.5 text-xs font-bold flex items-center justify-between shrink-0 shadow-sm">
+              <div className="flex items-center gap-2">
+                <ListVideo className="w-4 h-4 animate-pulse" />
+                <span>
+                  Reproduciendo Grupo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
+                  {playingQueue[playingQueueIndex]?.name}
+                </span>
               </div>
-              {playingQueue && (
-                <div className="flex items-center gap-2 bg-[#cc2016] text-white px-3 py-1 text-xs font-bold rounded animate-pulse">
-                  <ListVideo className="w-3.5 h-3.5" />
-                  <span>
-                    Reproduciendo Grupo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
-                    {playingQueue[playingQueueIndex]?.name}
-                  </span>
-                  <button
-                    onClick={() => setPlayingQueue(null)}
-                    className="ml-1 underline text-[11px] hover:text-amber-200"
-                  >
-                    Detener cola
-                  </button>
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2">
               <button
-                onClick={handleClearProject}
-                className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-semibold transition"
+                onClick={() => setPlayingQueue(null)}
+                className="underline text-[11px] hover:text-amber-200"
               >
-                Limpiar proyecto
-              </button>
-              <button
-                onClick={handleInstallApp}
-                className="px-3.5 py-1.5 bg-transparent hover:bg-[#2d2d2d] border border-gray-500 text-white font-condensed font-bold text-xs tracking-wider uppercase transition"
-              >
-                INSTALAR APP
+                Detener reproducción continua
               </button>
             </div>
-          </div>
+          )}
         </>
       )}
 
@@ -4425,35 +4374,6 @@ ${xmlInstances}
                           : 'pointer-events-none'
                       }`}
                     />
-                  </div>
-
-                  {/* BOTONES FLOTANTES SOBRE EL VÍDEO (Siempre visibles incluso en pantalla completa del reproductor) */}
-                  <div className="absolute top-3 right-3 z-30 flex items-center gap-2 pointer-events-auto">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen().catch(() => {});
-                        }
-                        enterBotoneraFullscreen();
-                      }}
-                      className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-condensed font-extrabold uppercase tracking-wider rounded shadow-2xl flex items-center gap-1.5 border border-white/30 backdrop-blur transition hover:scale-105"
-                      title="Abrir la Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                      <span>⚡ Botonera Pantalla Completa</span>
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowBotoneraBuilderModal(true);
-                      }}
-                      className="px-3 py-1.5 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 text-xs font-condensed font-extrabold uppercase tracking-wider rounded shadow-2xl flex items-center gap-1.5 border border-yellow-200 backdrop-blur transition hover:scale-105"
-                      title="Crear y Personalizar Botonera como en Nacsport"
-                    >
-                      <Sliders className="w-3.5 h-3.5 text-black" />
-                      <span>🛠 Crear Botonera</span>
-                    </button>
                   </div>
 
                   {/* Indicador de Imagen Parada / Pausa Táctica Insertada en el Vídeo */}
@@ -4718,30 +4638,6 @@ ${xmlInstances}
                       {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </button>
 
-                    {/* BOTONES DIRECTOS DE BOTONERA EN LA BARRA DEL REPRODUCTOR */}
-                    <button
-                      onClick={() => {
-                        if (document.fullscreenElement) {
-                          document.exitFullscreen().catch(() => {});
-                        }
-                        enterBotoneraFullscreen();
-                      }}
-                      className="px-3 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow"
-                      title="Abrir Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
-                    >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                      <span>⚡ Botonera Pantalla Completa</span>
-                    </button>
-
-                    <button
-                      onClick={() => setShowBotoneraBuilderModal(true)}
-                      className="px-3 py-1.5 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow"
-                      title="Crear y Personalizar Botonera como en Nacsport"
-                    >
-                      <Sliders className="w-3.5 h-3.5 text-black" />
-                      <span>🛠 Crear Botonera</span>
-                    </button>
-
                     <button
                       onClick={handleToggleFullscreen}
                       className="px-2.5 py-1.5 bg-[#1b1b1b] hover:bg-[#2c2c2c] text-gray-300 text-xs flex items-center gap-1.5"
@@ -4793,37 +4689,6 @@ ${xmlInstances}
                       className="w-7 h-7 bg-[#e6e6e6] hover:bg-white text-[#141414] font-bold text-xs flex items-center justify-center"
                     >
                       +
-                    </button>
-
-                    <button
-                      onClick={() => {
-                        if (!autoCropBlackBars) {
-                          setAutoCropBlackBars(true);
-                          setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 30);
-                          notify('Ajuste automático sin bandas negras activado');
-                        } else if (videoRef.current) {
-                          const det = detectVideoCropBounds(videoRef.current);
-                          if (det) {
-                            setVideoCropBounds(det);
-                            setActiveVideoCropBounds(det);
-                            notify('Encuadre ajustado al 100% del visor sin espacios en negro');
-                          } else {
-                            setAutoCropBlackBars(false);
-                            const full = { left: 0, right: 1, top: 0, bottom: 1 };
-                            setVideoCropBounds(full);
-                            setActiveVideoCropBounds(full);
-                            notify('Mostrando fotograma completo original');
-                          }
-                        }
-                      }}
-                      className={`px-2.5 py-1 text-xs font-semibold transition flex items-center gap-1 ${
-                        autoCropBlackBars
-                          ? 'bg-[#cc2016] text-white hover:bg-[#a81810]'
-                          : 'bg-[#1b1b1b] text-gray-300 hover:bg-[#2c2c2c]'
-                      }`}
-                      title="Elimina automáticamente las franjas negras laterales y superiores/inferiores del vídeo"
-                    >
-                      <span>Sin bordes negros</span>
                     </button>
                   </div>
                 </div>
