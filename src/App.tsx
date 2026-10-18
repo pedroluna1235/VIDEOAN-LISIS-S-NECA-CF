@@ -220,6 +220,8 @@ export default function App() {
     remaining: number;
     total: number;
     resumeAfter: boolean;
+    manualHold?: boolean;
+    advanceQueueAfter?: boolean;
   } | null>(null);
   const triggeredFreezeIdsRef = useRef<Set<string>>(new Set());
 
@@ -440,14 +442,85 @@ export default function App() {
     playlists,
   ]);
 
+  const activateClipPlayback = useCallback(
+    (clip: ClipEvent, options?: { fromQueue?: boolean; holdManual?: boolean }) => {
+      setSelectedEventId(clip.id);
+      const targetT = clip.freezeTimestamp ?? clip.startTime;
+
+      if (activeTab === 'sin_video') {
+        setLiveTimerSeconds(targetT);
+        return;
+      }
+
+      // Si es una Imagen Parada insertada, paramos el vídeo por completo y mostramos la imagen fija
+      if (clip.isFreezeInsert && clip.drawingDataUrl && clip.notes === 'IMAGEN_PARADA') {
+        setCurrentTime(targetT);
+        if (videoRef.current && activeVideo) {
+          videoRef.current.pause();
+          videoRef.current.currentTime = targetT;
+          setIsPlaying(false);
+        }
+        const dur = clip.freezeDuration !== undefined ? clip.freezeDuration : 5;
+        triggeredFreezeIdsRef.current.add(clip.id);
+        setActiveFreezeOverlay({
+          eventId: clip.id,
+          dataUrl: clip.drawingDataUrl,
+          remaining: dur > 0 ? dur : 5,
+          total: dur > 0 ? dur : 5,
+          resumeAfter: !options?.fromQueue && !options?.holdManual,
+          manualHold: options?.holdManual || dur === 0,
+          advanceQueueAfter: Boolean(options?.fromQueue),
+        });
+        return;
+      }
+
+      setActiveFreezeOverlay(null);
+      setCurrentTime(clip.startTime);
+      if (videoRef.current && activeVideo) {
+        videoRef.current.currentTime = clip.startTime;
+        videoRef.current.play().catch(() => {});
+        setIsPlaying(true);
+      }
+    },
+    [activeTab, activeVideo]
+  );
+
   // Temporizador de pausa táctica cuando se reproduce o previsualiza un dibujo insertado en el vídeo
   useEffect(() => {
     if (!activeFreezeOverlay) return;
+
+    // Asegurar que mientras está la imagen parada activa el vídeo NO siga corriendo por debajo
+    if (videoRef.current && !videoRef.current.paused) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+
+    if (activeFreezeOverlay.manualHold) {
+      return;
+    }
+
     const interval = setInterval(() => {
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+        setIsPlaying(false);
+      }
       setActiveFreezeOverlay((prev) => {
         if (!prev) return null;
+        if (prev.manualHold) return prev;
         if (prev.remaining <= 0.15) {
-          if (prev.resumeAfter && videoRef.current && activeVideo) {
+          if (prev.advanceQueueAfter && playingQueue && playingQueue.length > 0) {
+            if (playingQueueIndex + 1 < playingQueue.length) {
+              const nextIdx = playingQueueIndex + 1;
+              const nextClip = playingQueue[nextIdx];
+              setPlayingQueueIndex(nextIdx);
+              setTimeout(() => activateClipPlayback(nextClip, { fromQueue: true }), 0);
+            } else {
+              if (videoRef.current) videoRef.current.pause();
+              setIsPlaying(false);
+              setPlayingQueue(null);
+              notify('Reproducción del grupo finalizada');
+            }
+          } else if (prev.resumeAfter && videoRef.current && activeVideo) {
             videoRef.current.currentTime = Math.min(
               duration || 99999,
               videoRef.current.currentTime + 0.2
@@ -461,7 +534,7 @@ export default function App() {
       });
     }, 100);
     return () => clearInterval(interval);
-  }, [activeFreezeOverlay, activeVideo, duration]);
+  }, [activeFreezeOverlay, activeVideo, duration, playingQueue, playingQueueIndex, activateClipPlayback, notify]);
 
   // Cronómetro en vivo para Registro Sin Vídeo
   useEffect(() => {
@@ -546,13 +619,7 @@ export default function App() {
     setPlayingQueue(clips);
     setPlayingQueueIndex(0);
     const first = clips[0];
-    setSelectedEventId(first.id);
-    setCurrentTime(first.startTime);
-    if (videoRef.current && activeVideo) {
-      videoRef.current.currentTime = first.startTime;
-      videoRef.current.play();
-      setIsPlaying(true);
-    }
+    activateClipPlayback(first, { fromQueue: true });
     notify(`Reproduciendo grupo: ${clips.length} corte(s) seguidos`);
   };
 
@@ -561,7 +628,7 @@ export default function App() {
     const t = videoRef.current.currentTime;
     setCurrentTime(t);
 
-    // Pausa táctica automática cuando el vídeo pasa por un dibujo insertado ("Insertar en el vídeo")
+    // Pausa táctica automática cuando el vídeo pasa por una Imagen Parada insertada (el vídeo se detiene por completo)
     if (!videoRef.current.paused && !activeFreezeOverlay) {
       for (const ev of events) {
         if (ev.isFreezeInsert && ev.drawingDataUrl) {
@@ -571,14 +638,16 @@ export default function App() {
           } else if (Math.abs(t - ft) <= 0.28 && !triggeredFreezeIdsRef.current.has(ev.id)) {
             triggeredFreezeIdsRef.current.add(ev.id);
             videoRef.current.pause();
+            videoRef.current.currentTime = ft;
             setIsPlaying(false);
-            const dur = ev.freezeDuration || insertFreezeSeconds || 5;
+            const dur = ev.freezeDuration !== undefined ? ev.freezeDuration : 5;
             setActiveFreezeOverlay({
               eventId: ev.id,
               dataUrl: ev.drawingDataUrl,
-              remaining: dur,
-              total: dur,
+              remaining: dur > 0 ? dur : 5,
+              total: dur > 0 ? dur : 5,
               resumeAfter: true,
+              manualHold: dur === 0,
             });
             return;
           }
@@ -594,9 +663,7 @@ export default function App() {
           const nextIdx = playingQueueIndex + 1;
           const nextClip = playingQueue[nextIdx];
           setPlayingQueueIndex(nextIdx);
-          setSelectedEventId(nextClip.id);
-          videoRef.current.currentTime = nextClip.startTime;
-          videoRef.current.play();
+          activateClipPlayback(nextClip, { fromQueue: true });
         } else {
           videoRef.current.pause();
           setIsPlaying(false);
@@ -1067,14 +1134,19 @@ export default function App() {
     notify('Imagen PNG con el pintado de acciones descargada');
   };
 
-  const handleInsertPaintedFrameInVideo = () => {
+  const handleInsertPaintedFrameInVideo = (
+    mode: 'imagen_parada' | 'video_corriendo' = 'imagen_parada'
+  ) => {
     if (videoRef.current && !videoRef.current.paused) {
       videoRef.current.pause();
       setIsPlaying(false);
     }
 
     const safeTime = Number.isFinite(currentTime) ? Number(currentTime.toFixed(1)) : 0;
-    const freezeSecs = Math.max(1, Number(insertFreezeSeconds) || 5);
+    const rawFreeze = Number(insertFreezeSeconds);
+    const isManualHold = rawFreeze === 0;
+    const freezeSecs = isManualHold ? 5 : Math.max(1, rawFreeze || 5);
+    const labelDuration = isManualHold ? 'Pausa fija' : `${freezeSecs} s`;
 
     // Si había un polígono/conector en curso al pulsar Insertar, lo cerramos e incluimos
     let updatedDrawings = [...drawings];
@@ -1098,7 +1170,7 @@ export default function App() {
       setCurrentDraftAction(null);
     }
 
-    // Anclar los dibujos visibles al segundo actual del vídeo para que se vean al reproducir
+    // Anclar los dibujos visibles al segundo actual del vídeo
     updatedDrawings = updatedDrawings.map((d) => {
       const isCurrentlyShown =
         drawingMode ||
@@ -1125,10 +1197,13 @@ export default function App() {
 
     const newCap: CaptureItem = {
       id: `cap-${Date.now()}`,
-      name: `Pizarra (${freezeSecs}s) @ ${formatTimecode(safeTime)}`,
+      name:
+        mode === 'imagen_parada'
+          ? `Imagen Parada (${labelDuration}) @ ${formatTimecode(safeTime)}`
+          : `Pizarra en Vídeo (${freezeSecs}s) @ ${formatTimecode(safeTime)}`,
       timestamp: safeTime,
       dataUrl,
-      freezeDuration: freezeSecs,
+      freezeDuration: isManualHold ? 0 : freezeSecs,
       createdAt: new Date().toISOString(),
     };
     const nextCaps = [newCap, ...captures];
@@ -1141,43 +1216,53 @@ export default function App() {
       detectedHalf = '1ª Parte';
     }
 
-    const freezeEvent: ClipEvent = {
+    const isStill = mode === 'imagen_parada';
+
+    const newEvent: ClipEvent = {
       id: `ev-pint-${Date.now()}`,
-      name: `Pintado Táctico (${freezeSecs} s)`,
+      name: isStill ? `Imagen Parada (${labelDuration})` : `Pintado en Vídeo (${freezeSecs} s)`,
       category: 'Pizarra Táctica',
       color: strokeColor || '#cc2016',
-      startTime: Math.max(0, Number((safeTime - 1.5).toFixed(1))),
-      endTime: Number((safeTime + 1.5).toFixed(1)),
+      startTime: isStill ? safeTime : Math.max(0, Number((safeTime - 1.5).toFixed(1))),
+      endTime: Number((safeTime + freezeSecs).toFixed(1)),
       videoId: activeVideo?.id || 'sin-video',
       videoName: activeVideo?.name || 'Visor',
       team: 'Séneca CF',
       half: detectedHalf,
       zone: selectedPitchZone,
       descriptors: ['Éxito / Positivo'],
+      notes: isStill ? 'IMAGEN_PARADA' : undefined,
       drawingDataUrl: dataUrl,
-      isFreezeInsert: true,
+      isFreezeInsert: isStill,
       freezeTimestamp: safeTime,
-      freezeDuration: freezeSecs,
+      freezeDuration: isManualHold ? 0 : freezeSecs,
       createdAt: new Date().toISOString(),
     };
 
-    const nextEvents = [...events, freezeEvent];
+    const nextEvents = [...events, newEvent];
     setEvents(nextEvents);
-    setSelectedEventId(freezeEvent.id);
+    setSelectedEventId(newEvent.id);
     setDrawingMode(false);
     pushHistory({ events: nextEvents, captures: nextCaps, drawings: updatedDrawings });
 
-    // Mostrar el fotograma táctico insertado sobre el visor durante los segundos configurados
-    triggeredFreezeIdsRef.current.add(freezeEvent.id);
-    setActiveFreezeOverlay({
-      eventId: freezeEvent.id,
-      dataUrl,
-      remaining: freezeSecs,
-      total: freezeSecs,
-      resumeAfter: false,
-    });
-
-    notify(`Pintado insertado en el vídeo (${freezeSecs} s) y guardado en Eventos y Capturas`);
+    if (isStill) {
+      // Mantiene la imagen totalmente parada en el visor sin que el vídeo siga corriendo
+      triggeredFreezeIdsRef.current.add(newEvent.id);
+      setActiveFreezeOverlay({
+        eventId: newEvent.id,
+        dataUrl,
+        remaining: freezeSecs,
+        total: freezeSecs,
+        resumeAfter: false,
+        manualHold: true,
+      });
+      notify(
+        `Imagen parada (${labelDuration}) insertada: el vídeo se detendrá en este fotograma sin seguir corriendo`
+      );
+    } else {
+      setActiveFreezeOverlay(null);
+      notify(`Pintado insertado con el vídeo en movimiento (${freezeSecs} s)`);
+    }
   };
 
   const handleFilesSelected = (fileList: FileList | null) => {
@@ -1573,6 +1658,129 @@ export default function App() {
     notify('Avanzado al siguiente periodo en la línea de tiempo');
   };
 
+  const loadDataUrlImage = (dataUrl: string): Promise<HTMLImageElement | null> => {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  };
+
+  const renderClipToExportCanvas = async (
+    clip: ClipEvent,
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    bannerText: string
+  ): Promise<void> => {
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+
+    const drawBanner = () => {
+      ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
+      ctx.fillRect(30, height - 68, 600, 46);
+      ctx.fillStyle = clip.color || '#cc2016';
+      ctx.fillRect(30, height - 68, 10, 46);
+      ctx.fillStyle = '#f5b800';
+      ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(bannerText, 52, height - 40);
+    };
+
+    // Caso 1: El corte es una Imagen Parada insertada (el vídeo permanece 100% detenido durante los segundos de pausa)
+    if (clip.isFreezeInsert && clip.drawingDataUrl) {
+      videoEl.pause();
+      const freezeImg = await loadDataUrlImage(clip.drawingDataUrl);
+      const holdMs = Math.max(2, clip.freezeDuration || insertFreezeSeconds || 5) * 1000;
+      const startPerf = performance.now();
+
+      await new Promise<void>((res) => {
+        const holdStep = () => {
+          if (performance.now() - startPerf >= holdMs) {
+            res();
+            return;
+          }
+          if (freezeImg) {
+            ctx.drawImage(freezeImg, 0, 0, width, height);
+          } else {
+            ctx.drawImage(videoEl, 0, 0, width, height);
+          }
+          drawBanner();
+          requestAnimationFrame(holdStep);
+        };
+        requestAnimationFrame(holdStep);
+      });
+      return;
+    }
+
+    // Caso 2: Corte de vídeo en movimiento (con soporte para pausar si incluye una Imagen Parada intermedia)
+    const nestedFreezes = events.filter(
+      (ev) =>
+        ev.id !== clip.id &&
+        ev.isFreezeInsert &&
+        ev.drawingDataUrl &&
+        (ev.freezeTimestamp ?? ev.startTime) >= clip.startTime &&
+        (ev.freezeTimestamp ?? ev.startTime) <= clip.endTime
+    );
+    const usedNestedIds = new Set<string>();
+
+    await new Promise<void>((res) => {
+      videoEl.pause();
+      videoEl.currentTime = clip.startTime;
+      const onSeek = () => {
+        videoEl.removeEventListener('seeked', onSeek);
+        videoEl.play().catch(() => {});
+
+        const step = async () => {
+          if (videoEl.currentTime >= clip.endTime || videoEl.ended) {
+            videoEl.pause();
+            res();
+            return;
+          }
+
+          const hitFreeze = nestedFreezes.find(
+            (nf) =>
+              !usedNestedIds.has(nf.id) &&
+              Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.25
+          );
+
+          if (hitFreeze && hitFreeze.drawingDataUrl) {
+            usedNestedIds.add(hitFreeze.id);
+            videoEl.pause();
+            const fImg = await loadDataUrlImage(hitFreeze.drawingDataUrl);
+            const holdMs = Math.max(2, hitFreeze.freezeDuration || 5) * 1000;
+            const t0 = performance.now();
+            await new Promise<void>((doneHold) => {
+              const loopHold = () => {
+                if (performance.now() - t0 >= holdMs) {
+                  doneHold();
+                  return;
+                }
+                if (fImg) {
+                  ctx.drawImage(fImg, 0, 0, width, height);
+                }
+                drawBanner();
+                requestAnimationFrame(loopHold);
+              };
+              requestAnimationFrame(loopHold);
+            });
+            videoEl.play().catch(() => {});
+          }
+
+          ctx.drawImage(videoEl, 0, 0, width, height);
+          if (overlayCanvasRef.current) {
+            ctx.drawImage(overlayCanvasRef.current, 0, 0, width, height);
+          }
+          drawBanner();
+          requestAnimationFrame(step);
+        };
+
+        requestAnimationFrame(step);
+      };
+      videoEl.addEventListener('seeked', onSeek);
+    });
+  };
+
   // Exportación real de clips de vídeo (puede exportar todos, solo un grupo clasificado o una lista de presentación)
   const recordClipSegment = async (clip: ClipEvent): Promise<Blob | null> => {
     const videoEl = videoRef.current;
@@ -1598,50 +1806,20 @@ export default function App() {
       if (ev.data.size > 0) chunks.push(ev.data);
     };
 
+    recorder.start();
+    await renderClipToExportCanvas(
+      clip,
+      ctx,
+      width,
+      height,
+      `SÉNECA CF | ${clip.category.toUpperCase()} · ${clip.name.toUpperCase()}`
+    );
+
     return new Promise((resolve) => {
       recorder.onstop = () => {
         resolve(new Blob(chunks, { type: mimeType }));
       };
-
-      videoEl.pause();
-      videoEl.currentTime = clip.startTime;
-
-      const onSeeked = () => {
-        videoEl.removeEventListener('seeked', onSeeked);
-        recorder.start();
-        videoEl.play();
-
-        const renderLoop = () => {
-          if (videoEl.currentTime >= clip.endTime || videoEl.ended) {
-            videoEl.pause();
-            if (recorder.state === 'recording') recorder.stop();
-            return;
-          }
-
-          ctx.drawImage(videoEl, 0, 0, width, height);
-          if (overlayCanvasRef.current) {
-            ctx.drawImage(overlayCanvasRef.current, 0, 0, width, height);
-          }
-
-          ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
-          ctx.fillRect(30, height - 68, 560, 46);
-          ctx.fillStyle = clip.color || '#cc2016';
-          ctx.fillRect(30, height - 68, 10, 46);
-          ctx.fillStyle = '#f5b800';
-          ctx.font = 'bold 18px sans-serif';
-          ctx.fillText(
-            `SÉNECA CF | ${clip.category.toUpperCase()} · ${clip.name.toUpperCase()}`,
-            52,
-            height - 40
-          );
-
-          requestAnimationFrame(renderLoop);
-        };
-
-        requestAnimationFrame(renderLoop);
-      };
-
-      videoEl.addEventListener('seeked', onSeeked);
+      if (recorder.state === 'recording') recorder.stop();
     });
   };
 
@@ -1706,45 +1884,17 @@ export default function App() {
         };
 
         recorder.start();
-        const videoEl = videoRef.current;
 
         for (let i = 0; i < targetClips.length; i++) {
           const clip = targetClips[i];
           setExportProgressText(`Uniendo corte ${i + 1}/${targetClips.length} (${clip.category}): ${clip.name}...`);
-
-          await new Promise<void>((res) => {
-            videoEl.pause();
-            videoEl.currentTime = clip.startTime;
-            const onSeek = () => {
-              videoEl.removeEventListener('seeked', onSeek);
-              videoEl.play();
-              const step = () => {
-                if (videoEl.currentTime >= clip.endTime || videoEl.ended) {
-                  videoEl.pause();
-                  res();
-                  return;
-                }
-                ctx.drawImage(videoEl, 0, 0, width, height);
-                if (overlayCanvasRef.current) {
-                  ctx.drawImage(overlayCanvasRef.current, 0, 0, width, height);
-                }
-                ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
-                ctx.fillRect(30, height - 68, 600, 46);
-                ctx.fillStyle = clip.color || '#cc2016';
-                ctx.fillRect(30, height - 68, 10, 46);
-                ctx.fillStyle = '#f5b800';
-                ctx.font = 'bold 18px sans-serif';
-                ctx.fillText(
-                  `SÉNECA CF | [${i + 1}/${targetClips.length}] ${clip.category.toUpperCase()} - ${clip.name.toUpperCase()}`,
-                  52,
-                  height - 40
-                );
-                requestAnimationFrame(step);
-              };
-              requestAnimationFrame(step);
-            };
-            videoEl.addEventListener('seeked', onSeek);
-          });
+          await renderClipToExportCanvas(
+            clip,
+            ctx,
+            width,
+            height,
+            `SÉNECA CF | [${i + 1}/${targetClips.length}] ${clip.category.toUpperCase()} - ${clip.name.toUpperCase()}`
+          );
         }
 
         await new Promise<void>((res) => {
@@ -2209,31 +2359,60 @@ ${xmlInstances}
                     />
                   </div>
 
-                  {/* Indicador de Pausa Táctica Insertada en el Vídeo */}
+                  {/* Indicador de Imagen Parada / Pausa Táctica Insertada en el Vídeo */}
                   {activeFreezeOverlay && (
                     <div className="absolute top-3 left-3 z-30 flex items-center gap-2.5 bg-[#15181d]/95 border-l-4 border-[#cc2016] text-white px-3 py-1.5 shadow-lg">
-                      <span className="w-2.5 h-2.5 rounded-full bg-[#f5b800] animate-ping" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#f5b800] animate-pulse" />
                       <div className="flex flex-col">
                         <span className="font-condensed font-bold text-xs uppercase tracking-wider text-[#f5b800]">
-                          PIZARRA TÁCTICA EN VÍDEO · {activeFreezeOverlay.remaining.toFixed(1)} s
+                          {activeFreezeOverlay.manualHold
+                            ? 'IMAGEN PARADA · VÍDEO DETENIDO'
+                            : `IMAGEN PARADA EN VÍDEO · ${activeFreezeOverlay.remaining.toFixed(1)} s`}
                         </span>
-                        <div className="w-36 h-1 bg-gray-700 rounded overflow-hidden mt-0.5">
-                          <div
-                            className="h-full bg-[#cc2016] transition-all duration-100"
-                            style={{
-                              width: `${Math.max(
-                                0,
-                                Math.min(100, (activeFreezeOverlay.remaining / activeFreezeOverlay.total) * 100)
-                              )}%`,
-                            }}
-                          />
-                        </div>
+                        {!activeFreezeOverlay.manualHold ? (
+                          <div className="w-36 h-1 bg-gray-700 rounded overflow-hidden mt-0.5">
+                            <div
+                              className="h-full bg-[#cc2016] transition-all duration-100"
+                              style={{
+                                width: `${Math.max(
+                                  0,
+                                  Math.min(100, (activeFreezeOverlay.remaining / activeFreezeOverlay.total) * 100)
+                                )}%`,
+                              }}
+                            />
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-gray-300 leading-tight">
+                            El vídeo permanece parado mostrando la pizarra táctica
+                          </span>
+                        )}
                       </div>
                       <button
                         onClick={() => {
-                          const shouldResume = activeFreezeOverlay.resumeAfter;
                           setActiveFreezeOverlay(null);
-                          if (shouldResume && videoRef.current && activeVideo) {
+                          if (videoRef.current) {
+                            videoRef.current.pause();
+                            setIsPlaying(false);
+                          }
+                        }}
+                        className="ml-1 px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-white font-condensed font-bold text-[11px] uppercase rounded-sm transition"
+                        title="Quitar superposición manteniendo el vídeo en pausa"
+                      >
+                        Ver fotograma
+                      </button>
+                      <button
+                        onClick={() => {
+                          const advanceQueue = activeFreezeOverlay.advanceQueueAfter;
+                          setActiveFreezeOverlay(null);
+                          if (advanceQueue && clipQueue.length > 0) {
+                            const [, ...rest] = clipQueue;
+                            setClipQueue(rest);
+                            if (rest.length > 0) {
+                              activateClipPlayback(rest[0], { fromQueue: true });
+                            }
+                            return;
+                          }
+                          if (videoRef.current && activeVideo) {
                             videoRef.current.currentTime = Math.min(
                               duration || 99999,
                               videoRef.current.currentTime + 0.25
@@ -2242,9 +2421,9 @@ ${xmlInstances}
                             setIsPlaying(true);
                           }
                         }}
-                        className="ml-1 px-2 py-0.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-[11px] uppercase rounded-sm transition"
+                        className="px-2 py-0.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-[11px] uppercase rounded-sm transition"
                       >
-                        Continuar
+                        Reanudar vídeo
                       </button>
                     </div>
                   )}
@@ -2848,7 +3027,10 @@ ${xmlInstances}
                           setSelectedEventId(ev.id);
                           if (activeTab === 'sin_video') {
                             setLiveTimerSeconds(ev.startTime);
+                          } else if (ev.isFreezeInsert && ev.drawingDataUrl) {
+                            activateClipPlayback(ev, { holdManual: true });
                           } else {
+                            setActiveFreezeOverlay(null);
                             setCurrentTime(ev.startTime);
                             if (videoRef.current && activeVideo) {
                               videoRef.current.currentTime = ev.startTime;
@@ -3108,12 +3290,7 @@ ${xmlInstances}
                                   key={ev.id}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setSelectedEventId(ev.id);
-                                    setCurrentTime(ev.startTime);
-                                    if (videoRef.current && activeVideo) {
-                                      videoRef.current.currentTime = ev.startTime;
-                                      videoRef.current.play();
-                                    }
+                                    activateClipPlayback(ev, { holdManual: true });
                                   }}
                                   style={{
                                     left: `${leftPct}%`,
@@ -3803,12 +3980,7 @@ ${xmlInstances}
                                       <div
                                         key={ev.id}
                                         onClick={() => {
-                                          setSelectedEventId(ev.id);
-                                          setCurrentTime(ev.startTime);
-                                          if (videoRef.current && activeVideo) {
-                                            videoRef.current.currentTime = ev.startTime;
-                                            videoRef.current.play();
-                                          }
+                                          activateClipPlayback(ev, { holdManual: true });
                                         }}
                                         className={`p-1.5 text-xs cursor-pointer transition flex items-center justify-between ${
                                           selectedEventId === ev.id ? 'bg-amber-50/80' : 'hover:bg-gray-50'
@@ -3993,12 +4165,7 @@ ${xmlInstances}
                               <div
                                 key={ev.id}
                                 onClick={() => {
-                                  setSelectedEventId(ev.id);
-                                  setCurrentTime(ev.startTime);
-                                  if (videoRef.current && activeVideo) {
-                                    videoRef.current.currentTime = ev.startTime;
-                                    videoRef.current.play();
-                                  }
+                                  activateClipPlayback(ev, { holdManual: true });
                                 }}
                                 className="bg-white border border-gray-200 p-1.5 rounded text-xs flex items-center justify-between cursor-pointer hover:bg-amber-50"
                               >
@@ -4233,9 +4400,7 @@ ${xmlInstances}
                   >
                     Rehacer
                   </button>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     onClick={handleExportPNG}
                     className="px-2.5 py-1.5 bg-white hover:bg-gray-50 border border-gray-200 text-gray-800 text-xs font-medium flex items-center gap-1.5"
@@ -4243,16 +4408,49 @@ ${xmlInstances}
                     <Download className="w-3.5 h-3.5" />
                     <span>Exportar PNG</span>
                   </button>
+                </div>
+
+                {/* Opciones de inserción del dibujo: Imagen Parada (sin que corra el vídeo) vs Vídeo Corriendo */}
+                <div className="p-2 bg-gray-50 border border-gray-200 space-y-1.5">
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => handleInsertPaintedFrameInVideo('imagen_parada')}
+                      className={`flex-1 px-2.5 py-1.5 border text-xs font-semibold transition flex items-center justify-center gap-1.5 ${
+                        drawings.length > 0
+                          ? 'bg-[#cc2016] hover:bg-[#b01b12] border-[#cc2016] text-white shadow-sm'
+                          : 'bg-[#15181d] hover:bg-[#252a32] border-[#15181d] text-white'
+                      }`}
+                      title="Congela el fotograma actual y mantiene el vídeo totalmente parado mostrando la imagen pintada"
+                    >
+                      <Pause className="w-3.5 h-3.5 fill-current shrink-0" />
+                      <span>
+                        Insertar imagen parada ({insertFreezeSeconds === 0 ? 'Pausa fija' : `${insertFreezeSeconds} s`})
+                      </span>
+                    </button>
+
+                    <select
+                      value={insertFreezeSeconds}
+                      onChange={(e) => setInsertFreezeSeconds(Number(e.target.value))}
+                      className="border border-gray-300 bg-white px-1.5 py-1.5 text-[11px] font-semibold text-gray-800 focus:outline-none"
+                      title="Duración de la imagen parada en el vídeo"
+                    >
+                      <option value={0}>Pausa fija</option>
+                      <option value={3}>3 s parada</option>
+                      <option value={5}>5 s parada</option>
+                      <option value={8}>8 s parada</option>
+                      <option value={10}>10 s parada</option>
+                    </select>
+                  </div>
 
                   <button
-                    onClick={handleInsertPaintedFrameInVideo}
-                    className={`px-3 py-1.5 border text-xs font-medium transition flex items-center gap-1.5 ${
-                      drawings.length > 0
-                        ? 'bg-[#cc2016] border-[#cc2016] text-white font-semibold shadow-sm'
-                        : 'bg-white hover:bg-gray-50 border-gray-200 text-gray-800'
-                    }`}
+                    onClick={() => handleInsertPaintedFrameInVideo('video_corriendo')}
+                    className="w-full px-2.5 py-1.5 bg-white hover:bg-gray-100 border border-gray-300 text-gray-800 text-xs font-semibold transition flex items-center justify-center gap-1.5"
+                    title="Inserta el dibujo mientras el vídeo sigue corriendo por debajo"
                   >
-                    <span>Insertar en el vídeo ({insertFreezeSeconds} s)</span>
+                    <Play className="w-3.5 h-3.5 fill-current text-[#cc2016] shrink-0" />
+                    <span>
+                      Insertar con vídeo corriendo ({visibleDuration === 0 ? 'Todo' : `${visibleDuration} s`})
+                    </span>
                   </button>
                 </div>
 
