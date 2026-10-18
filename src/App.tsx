@@ -299,7 +299,7 @@ export default function App() {
   const [eventsSubTab, setEventsSubTab] = useState<'evento' | 'listas' | 'capturas'>('evento');
 
   // Exportación
-  const [exportResolution, setExportResolution] = useState<'720p' | '1080p' | '480p'>('720p');
+  const [exportResolution, setExportResolution] = useState<'720p' | '1080p' | '480p'>('1080p');
   const [exportFps, setExportFps] = useState<'30 fps' | '60 fps' | '25 fps'>('30 fps');
   const [exportFileName, setExportFileName] = useState<string>('');
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -2508,9 +2508,23 @@ export default function App() {
     };
 
     // Caso 1: El corte es una Imagen Parada insertada (el vídeo permanece 100% detenido durante los segundos de pausa)
-    if (clip.isFreezeInsert && clip.drawingDataUrl) {
+    if (clip.isFreezeInsert) {
       videoEl.pause();
-      const freezeImg = await loadDataUrlImage(clip.drawingDataUrl);
+      const freezeTime = clip.freezeTimestamp ?? clip.startTime;
+      videoEl.currentTime = freezeTime;
+
+      await new Promise<void>((resSeek) => {
+        const onSeeked = () => {
+          videoEl.removeEventListener('seeked', onSeeked);
+          resSeek();
+        };
+        if (Math.abs(videoEl.currentTime - freezeTime) < 0.05) {
+          resSeek();
+        } else {
+          videoEl.addEventListener('seeked', onSeeked);
+        }
+      });
+
       const holdMs = Math.max(2, clip.freezeDuration || insertFreezeSeconds || 5) * 1000;
       const startPerf = performance.now();
 
@@ -2520,11 +2534,21 @@ export default function App() {
             res();
             return;
           }
-          if (freezeImg) {
-            ctx.drawImage(freezeImg, 0, 0, width, height);
-          } else {
-            drawVideoFrameCropped(ctx, videoEl, width, height);
-          }
+          // Dibuja el fotograma nativo del vídeo con la máxima calidad y nitidez
+          drawVideoFrameCropped(ctx, videoEl, width, height);
+
+          // Renderiza los dibujos tácticos vectoriales escalados perfectamente
+          ctx.save();
+          ctx.scale(width / 1280, height / 720);
+          renderDrawingActions(ctx, drawingsRef.current, {
+            currentTime: freezeTime,
+            selectedId: null,
+            ignoreTimeVisibility: true,
+            videoElement: videoEl,
+            senecaLogoImg: senecaLogoRef.current,
+          });
+          ctx.restore();
+
           drawBanner();
           requestAnimationFrame(holdStep);
         };
@@ -2538,7 +2562,6 @@ export default function App() {
       (ev) =>
         ev.id !== clip.id &&
         ev.isFreezeInsert &&
-        ev.drawingDataUrl &&
         (ev.freezeTimestamp ?? ev.startTime) >= clip.startTime &&
         (ev.freezeTimestamp ?? ev.startTime) <= clip.endTime
     );
@@ -2564,10 +2587,11 @@ export default function App() {
               Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.25
           );
 
-          if (hitFreeze && hitFreeze.drawingDataUrl) {
+          if (hitFreeze) {
             usedNestedIds.add(hitFreeze.id);
             videoEl.pause();
-            const fImg = await loadDataUrlImage(hitFreeze.drawingDataUrl);
+            const freezeTime = hitFreeze.freezeTimestamp ?? hitFreeze.startTime;
+            videoEl.currentTime = freezeTime;
             const holdMs = Math.max(2, hitFreeze.freezeDuration || 5) * 1000;
             const t0 = performance.now();
             await new Promise<void>((doneHold) => {
@@ -2576,9 +2600,17 @@ export default function App() {
                   doneHold();
                   return;
                 }
-                if (fImg) {
-                  ctx.drawImage(fImg, 0, 0, width, height);
-                }
+                drawVideoFrameCropped(ctx, videoEl, width, height);
+                ctx.save();
+                ctx.scale(width / 1280, height / 720);
+                renderDrawingActions(ctx, drawingsRef.current, {
+                  currentTime: freezeTime,
+                  selectedId: null,
+                  ignoreTimeVisibility: true,
+                  videoElement: videoEl,
+                  senecaLogoImg: senecaLogoRef.current,
+                });
+                ctx.restore();
                 drawBanner();
                 requestAnimationFrame(loopHold);
               };
@@ -2626,14 +2658,21 @@ export default function App() {
     const exportCanvas = document.createElement('canvas');
     exportCanvas.width = width;
     exportCanvas.height = height;
-    const ctx = exportCanvas.getContext('2d')!;
+    const ctx = exportCanvas.getContext('2d', { alpha: false })!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
 
     const stream = exportCanvas.captureStream(fps);
+    const bitrate = exportResolution === '1080p' ? 14_000_000 : 8_500_000;
     let mimeType = 'video/webm;codecs=vp9';
+    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4;codecs=avc1';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4';
 
-    const recorder = new MediaRecorder(stream, { mimeType });
+    const recorder = new MediaRecorder(stream, {
+      mimeType,
+      videoBitsPerSecond: bitrate,
+    });
     const chunks: BlobPart[] = [];
     recorder.ondataavailable = (ev) => {
       if (ev.data.size > 0) chunks.push(ev.data);
@@ -2705,12 +2744,21 @@ export default function App() {
         const exportCanvas = document.createElement('canvas');
         exportCanvas.width = width;
         exportCanvas.height = height;
-        const ctx = exportCanvas.getContext('2d')!;
-        const stream = exportCanvas.captureStream(fps);
-        let mimeType = 'video/webm;codecs=vp9';
-        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+        const ctx = exportCanvas.getContext('2d', { alpha: false })!;
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
 
-        const recorder = new MediaRecorder(stream, { mimeType });
+        const stream = exportCanvas.captureStream(fps);
+        const bitrate = exportResolution === '1080p' ? 14_000_000 : 8_500_000;
+        let mimeType = 'video/webm;codecs=vp9';
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4;codecs=avc1';
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
+        if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4';
+
+        const recorder = new MediaRecorder(stream, {
+          mimeType,
+          videoBitsPerSecond: bitrate,
+        });
         const chunks: BlobPart[] = [];
         recorder.ondataavailable = (e) => {
           if (e.data.size > 0) chunks.push(e.data);
