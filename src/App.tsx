@@ -34,6 +34,14 @@ import {
   VideoCropBounds,
 } from './playerTracker';
 import {
+  saveVideoFile,
+  getVideosForProject,
+  deleteVideoFile,
+  deleteVideosForProject,
+  getProjectsVideoSummary,
+  revokeProjectBlobUrls,
+} from './videoStorage';
+import {
   Volume2,
   VolumeX,
   Maximize,
@@ -139,6 +147,8 @@ export default function App() {
   const [rivalName, setRivalName] = useState<string>('Rival FC');
   const [competition, setCompetition] = useState<string>('División de Honor / Liga Nacional');
   const [savedProjects, setSavedProjects] = useState<SenecaProject[]>([]);
+  const [projectsVideoSummary, setProjectsVideoSummary] = useState<Record<string, { count: number; videoNames: string[] }>>({});
+  const [projectSearchTerm, setProjectSearchTerm] = useState<string>('');
   const [showProjectsModal, setShowProjectsModal] = useState<boolean>(false);
   const [showSqlModal, setShowSqlModal] = useState<boolean>(false);
   const [showTutorialModal, setShowTutorialModal] = useState<boolean>(false);
@@ -504,94 +514,17 @@ export default function App() {
     }
   };
 
-  // Cargar desde LocalStorage y sincronizar con Supabase al iniciar
-  useEffect(() => {
+  const refreshProjectsVideoSummary = useCallback(async () => {
     try {
-      const localRaw = localStorage.getItem('seneca_cf_current_project');
-      if (localRaw) {
-        const parsed: SenecaProject = JSON.parse(localRaw);
-        setProjectId(parsed.id || 'seneca-default-project');
-        setProjectName(parsed.name || 'Jornada 1 - Séneca CF vs Rival');
-        setRivalName(parsed.rival || 'Rival FC');
-        setCompetition(parsed.competition || 'División de Honor');
-        setEvents(sanitizeLoadedEvents(parsed.events));
-        setCaptures(Array.isArray(parsed.captures) ? parsed.captures : []);
-        setDrawings(Array.isArray(parsed.drawings) ? parsed.drawings : []);
-        setMarkers(parsed.markers || {});
-        if (parsed.tag_categories && parsed.tag_categories.length > 0) {
-          setTagCategories(
-            parsed.tag_categories.map((c: TagCategory) => ({
-              ...c,
-              preRoll: 10,
-              postRoll: 10,
-            }))
-          );
-        }
-        if (parsed.playlists && parsed.playlists.length > 0) {
-          setPlaylists(parsed.playlists);
-        }
-      }
-    } catch (e) {
-      console.warn('Error cargando estado local:', e);
+      const summary = await getProjectsVideoSummary();
+      setProjectsVideoSummary(summary);
+    } catch {
+      // Ignorar
     }
-
-    fetchProjectsFromSupabase();
-
-    const handleBeforeInstallPrompt = (e: Event) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-    };
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
   }, []);
 
-  const fetchProjectsFromSupabase = async () => {
-    setSupabaseStatus('syncing');
-    try {
-      const { data, error } = await supabase
-        .from('seneca_projects')
-        .select('*')
-        .order('updated_at', { ascending: false })
-        .limit(20);
-
-      if (error) {
-        setSupabaseStatus('local_only');
-      } else {
-        setSupabaseStatus('synced');
-        if (data && data.length > 0) {
-          setSavedProjects(data as SenecaProject[]);
-          const localRaw = localStorage.getItem('seneca_cf_current_project');
-          if (!localRaw) {
-            const latest = data[0] as SenecaProject;
-            setProjectId(latest.id);
-            setProjectName(latest.name);
-            setRivalName(latest.rival || 'Rival FC');
-            setCompetition(latest.competition || 'División de Honor');
-            setEvents(sanitizeLoadedEvents(latest.events));
-            setCaptures(latest.captures || []);
-            setDrawings(latest.drawings || []);
-            setMarkers(latest.markers || {});
-            if (latest.tag_categories?.length) {
-              setTagCategories(
-                latest.tag_categories.map((c: TagCategory) => ({
-                  ...c,
-                  preRoll: 10,
-                  postRoll: 10,
-                }))
-              );
-            }
-            if (latest.playlists?.length) setPlaylists(latest.playlists);
-          }
-        }
-      }
-    } catch {
-      setSupabaseStatus('local_only');
-    }
-  };
-
-  // Auto-guardado seguro en LocalStorage + Supabase (protegido contra QuotaExceededError)
-  useEffect(() => {
-    const projectPayload: SenecaProject = {
+  const getProjectPayload = useCallback((): SenecaProject => {
+    return {
       id: projectId,
       name: projectName,
       rival: rivalName,
@@ -606,6 +539,368 @@ export default function App() {
       playlists,
       updated_at: new Date().toISOString(),
     };
+  }, [projectId, projectName, rivalName, competition, activeTab, events, captures, drawings, markers, tagCategories, playlists]);
+
+  const updateProjectInCatalog = useCallback((proj: SenecaProject) => {
+    try {
+      const raw = localStorage.getItem('seneca_projects_catalog');
+      let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(catalog)) catalog = [];
+      const idx = catalog.findIndex((p) => p.id === proj.id);
+      if (idx >= 0) {
+        catalog[idx] = proj;
+      } else {
+        catalog.unshift(proj);
+      }
+      localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+      setSavedProjects(catalog);
+    } catch (e) {
+      console.warn('Error guardando en catálogo:', e);
+    }
+  }, []);
+
+  // Cargar desde LocalStorage, IndexedDB y sincronizar con Supabase al iniciar
+  useEffect(() => {
+    const initializeAppProjects = async () => {
+      let catalog: SenecaProject[] = [];
+      try {
+        const rawCatalog = localStorage.getItem('seneca_projects_catalog');
+        if (rawCatalog) {
+          catalog = JSON.parse(rawCatalog);
+        }
+      } catch (e) {
+        console.warn('Error leyendo catálogo local:', e);
+      }
+
+      // Si aún no hay catálogo local pero sí un proyecto suelto antiguo en localStorage
+      let activeProj: SenecaProject | null = null;
+      const savedActiveId = localStorage.getItem('seneca_cf_active_project_id');
+
+      if (catalog && catalog.length > 0) {
+        activeProj = catalog.find((p) => p.id === savedActiveId) || catalog[0];
+      } else {
+        try {
+          const currentRaw = localStorage.getItem('seneca_cf_current_project');
+          if (currentRaw) {
+            const parsed = JSON.parse(currentRaw);
+            if (parsed && parsed.id) {
+              activeProj = parsed;
+              catalog = [parsed];
+            }
+          }
+        } catch (e) {
+          console.warn('Error leyendo proyecto previo:', e);
+        }
+      }
+
+      if (activeProj) {
+        setProjectId(activeProj.id || 'seneca-default-project');
+        setProjectName(activeProj.name || 'Jornada 1 - Séneca CF vs Rival');
+        setRivalName(activeProj.rival || 'Rival FC');
+        setCompetition(activeProj.competition || 'División de Honor');
+        setEvents(sanitizeLoadedEvents(activeProj.events));
+        setCaptures(Array.isArray(activeProj.captures) ? activeProj.captures : []);
+        setDrawings(Array.isArray(activeProj.drawings) ? activeProj.drawings : []);
+        setMarkers(activeProj.markers || {});
+        if (activeProj.tag_categories && activeProj.tag_categories.length > 0) {
+          setTagCategories(
+            activeProj.tag_categories.map((c: TagCategory) => ({
+              ...c,
+              preRoll: 10,
+              postRoll: 10,
+            }))
+          );
+        }
+        if (activeProj.playlists && activeProj.playlists.length > 0) {
+          setPlaylists(activeProj.playlists);
+        }
+        setSavedProjects(catalog);
+
+        // ¡CARGAR VÍDEOS DESDE INDEXEDDB PARA ESTE PARTIDO!
+        try {
+          const loadedVideos = await getVideosForProject(activeProj.id);
+          if (loadedVideos && loadedVideos.length > 0) {
+            setVideos(loadedVideos);
+            setActiveVideoId(loadedVideos[0].id);
+          }
+        } catch (dbErr) {
+          console.warn('Error recuperando vídeos en arranque:', dbErr);
+        }
+      } else {
+        // Crear primer proyecto por defecto si está totalmente vacío
+        const defaultProj: SenecaProject = {
+          id: 'seneca-default-project',
+          name: 'Jornada 1 - Séneca CF vs Rival',
+          rival: 'Rival FC',
+          competition: 'División de Honor / Liga Nacional',
+          match_date: new Date().toISOString().split('T')[0],
+          active_module: 'con_video',
+          events: [],
+          captures: [],
+          drawings: [],
+          markers: {},
+          tag_categories: DEFAULT_TAG_CATEGORIES,
+          playlists: DEFAULT_PLAYLISTS,
+          updated_at: new Date().toISOString(),
+        };
+        catalog = [defaultProj];
+        setSavedProjects(catalog);
+        localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+        localStorage.setItem('seneca_cf_active_project_id', defaultProj.id);
+      }
+
+      refreshProjectsVideoSummary();
+      fetchProjectsFromSupabase();
+    };
+
+    initializeAppProjects();
+
+    const handleBeforeInstallPrompt = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+  }, [refreshProjectsVideoSummary]);
+
+  const fetchProjectsFromSupabase = async () => {
+    setSupabaseStatus('syncing');
+    try {
+      const { data, error } = await supabase
+        .from('seneca_projects')
+        .select('*')
+        .order('updated_at', { ascending: false })
+        .limit(30);
+
+      if (error) {
+        setSupabaseStatus('local_only');
+      } else {
+        setSupabaseStatus('synced');
+        if (data && data.length > 0) {
+          const remoteProjects = data as SenecaProject[];
+          const rawCatalog = localStorage.getItem('seneca_projects_catalog');
+          let localCatalog: SenecaProject[] = rawCatalog ? JSON.parse(rawCatalog) : [];
+          if (!Array.isArray(localCatalog)) localCatalog = [];
+
+          const mergedMap = new Map<string, SenecaProject>();
+          remoteProjects.forEach((p) => mergedMap.set(p.id, p));
+          localCatalog.forEach((lp) => {
+            const remote = mergedMap.get(lp.id);
+            if (!remote || new Date(lp.updated_at || 0) > new Date(remote.updated_at || 0)) {
+              mergedMap.set(lp.id, lp);
+            }
+          });
+
+          const finalCatalog = Array.from(mergedMap.values()).sort(
+            (a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+          );
+
+          setSavedProjects(finalCatalog);
+          try {
+            localStorage.setItem('seneca_projects_catalog', JSON.stringify(finalCatalog));
+          } catch {
+            //
+          }
+        }
+      }
+    } catch {
+      setSupabaseStatus('local_only');
+    }
+  };
+
+  // Cambiar de partido: guarda el actual, carga el destino y su vídeo desde IndexedDB
+  const switchProject = async (targetProjectId: string) => {
+    if (targetProjectId === projectId) return;
+
+    // 1. Guardar el estado actual antes de cambiar
+    const currentPayload = getProjectPayload();
+    updateProjectInCatalog(currentPayload);
+    try {
+      supabase.from('seneca_projects').upsert(currentPayload, { onConflict: 'id' }).then();
+    } catch {
+      // Ignorar error de red
+    }
+
+    // 2. Limpiar URLs de vídeos actuales en memoria
+    revokeProjectBlobUrls(videos);
+
+    // 3. Buscar el proyecto destino
+    let target = savedProjects.find((p) => p.id === targetProjectId);
+    if (!target) {
+      try {
+        const raw = localStorage.getItem('seneca_projects_catalog');
+        const catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+        target = catalog.find((p) => p.id === targetProjectId);
+      } catch (e) {
+        console.warn(e);
+      }
+    }
+
+    if (!target) {
+      notify('No se encontró el partido seleccionado');
+      return;
+    }
+
+    // 4. Establecer datos del nuevo partido
+    setProjectId(target.id);
+    setProjectName(target.name || 'Partido Séneca CF');
+    setRivalName(target.rival || 'Rival FC');
+    setCompetition(target.competition || 'División de Honor / Liga Nacional');
+    setEvents(sanitizeLoadedEvents(target.events));
+    setCaptures(Array.isArray(target.captures) ? target.captures : []);
+    setDrawings(Array.isArray(target.drawings) ? target.drawings : []);
+    setMarkers(target.markers || {});
+    if (target.tag_categories && target.tag_categories.length > 0) {
+      setTagCategories(
+        target.tag_categories.map((c) => ({
+          ...c,
+          preRoll: 10,
+          postRoll: 10,
+        }))
+      );
+    }
+    if (target.playlists && target.playlists.length > 0) {
+      setPlaylists(target.playlists);
+    }
+
+    localStorage.setItem('seneca_cf_active_project_id', target.id);
+    try {
+      localStorage.setItem('seneca_cf_current_project', JSON.stringify(target));
+    } catch {
+      //
+    }
+
+    // 5. Cargar vídeos de este partido desde IndexedDB
+    try {
+      const matchVideos = await getVideosForProject(target.id);
+      setVideos(matchVideos);
+      if (matchVideos.length > 0) {
+        setActiveVideoId(matchVideos[0].id);
+      } else {
+        setActiveVideoId(null);
+      }
+    } catch (err) {
+      console.warn('Error cargando vídeos del nuevo partido:', err);
+      setVideos([]);
+      setActiveVideoId(null);
+    }
+
+    setCurrentTime(0);
+    setIsPlaying(false);
+    refreshProjectsVideoSummary();
+    notify(`Partido activado: ${target.name}`);
+  };
+
+  // Crear un nuevo partido limpio
+  const createNewProject = async (customName?: string, customRival?: string) => {
+    // 1. Guardar el actual
+    const currentPayload = getProjectPayload();
+    updateProjectInCatalog(currentPayload);
+
+    // 2. Limpiar URLs de vídeos
+    revokeProjectBlobUrls(videos);
+
+    const newId = `seneca-match-${Date.now()}`;
+    const pName = customName || `Jornada ${savedProjects.length + 1} - Séneca CF vs Rival`;
+    const rName = customRival || 'Rival FC';
+
+    const newProj: SenecaProject = {
+      id: newId,
+      name: pName,
+      rival: rName,
+      competition: 'División de Honor / Liga Nacional',
+      match_date: new Date().toISOString().split('T')[0],
+      active_module: activeTab,
+      events: [],
+      captures: [],
+      drawings: [],
+      markers: {},
+      tag_categories: DEFAULT_TAG_CATEGORIES,
+      playlists: DEFAULT_PLAYLISTS,
+      updated_at: new Date().toISOString(),
+    };
+
+    setProjectId(newId);
+    setProjectName(pName);
+    setRivalName(rName);
+    setCompetition(newProj.competition);
+    setEvents([]);
+    setCaptures([]);
+    setDrawings([]);
+    setMarkers({});
+    setVideos([]);
+    setActiveVideoId(null);
+    setCurrentTime(0);
+    setIsPlaying(false);
+
+    try {
+      const raw = localStorage.getItem('seneca_projects_catalog');
+      let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+      catalog = [newProj, ...catalog.filter((p) => p.id !== newId)];
+      localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+      localStorage.setItem('seneca_cf_active_project_id', newId);
+      localStorage.setItem('seneca_cf_current_project', JSON.stringify(newProj));
+      setSavedProjects(catalog);
+    } catch {
+      //
+    }
+
+    try {
+      supabase.from('seneca_projects').upsert(newProj, { onConflict: 'id' }).then();
+    } catch {
+      //
+    }
+
+    refreshProjectsVideoSummary();
+    notify('Nuevo partido creado. Ya puedes añadir el vídeo de este partido.');
+  };
+
+  // Eliminar un partido permanentemente junto con sus vídeos de IndexedDB
+  const deleteProject = async (targetProjectId: string) => {
+    const proj = savedProjects.find((p) => p.id === targetProjectId);
+    const pName = proj?.name || 'este partido';
+    if (!window.confirm(`¿Seguro que deseas eliminar permanentemente el partido "${pName}" y todos sus vídeos y cortes guardados?`)) {
+      return;
+    }
+
+    try {
+      // 1. Borrar todos los vídeos asociados en IndexedDB
+      await deleteVideosForProject(targetProjectId);
+
+      // 2. Borrar del catálogo local
+      const raw = localStorage.getItem('seneca_projects_catalog');
+      let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+      catalog = catalog.filter((p) => p.id !== targetProjectId);
+      localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+      setSavedProjects(catalog);
+
+      // 3. Borrar de Supabase
+      try {
+        await supabase.from('seneca_projects').delete().eq('id', targetProjectId);
+      } catch (e) {
+        console.warn('Error borrando en Supabase:', e);
+      }
+
+      // 4. Si era el activo, cambiar a otro o crear uno nuevo
+      if (projectId === targetProjectId) {
+        if (catalog.length > 0) {
+          await switchProject(catalog[0].id);
+        } else {
+          await createNewProject('Jornada 1 - Séneca CF vs Rival', 'Rival FC');
+        }
+      }
+
+      refreshProjectsVideoSummary();
+      notify(`Partido "${pName}" eliminado correctamente`);
+    } catch (err) {
+      console.error('Error al eliminar partido:', err);
+      notify('Error al eliminar el partido');
+    }
+  };
+
+  // Auto-guardado seguro en LocalStorage + Supabase
+  useEffect(() => {
+    const projectPayload = getProjectPayload();
 
     const timer = setTimeout(async () => {
       try {
@@ -615,6 +910,20 @@ export default function App() {
           captures: captures.map(({ dataUrl, ...rest }) => rest as CaptureItem),
         };
         localStorage.setItem('seneca_cf_current_project', JSON.stringify(storagePayload));
+        localStorage.setItem('seneca_cf_active_project_id', projectId);
+
+        // Actualizar también en el catálogo local de partidos
+        const rawCatalog = localStorage.getItem('seneca_projects_catalog');
+        let catalog: SenecaProject[] = rawCatalog ? JSON.parse(rawCatalog) : [];
+        if (!Array.isArray(catalog)) catalog = [];
+        const idx = catalog.findIndex((p) => p.id === projectId);
+        if (idx >= 0) {
+          catalog[idx] = storagePayload;
+        } else {
+          catalog.unshift(storagePayload);
+        }
+        localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+        setSavedProjects(catalog);
       } catch (err) {
         console.warn('Aviso guardado en localStorage:', err);
       }
@@ -632,19 +941,7 @@ export default function App() {
     }, 1200);
 
     return () => clearTimeout(timer);
-  }, [
-    projectId,
-    projectName,
-    rivalName,
-    competition,
-    activeTab,
-    events,
-    captures,
-    drawings,
-    markers,
-    tagCategories,
-    playlists,
-  ]);
+  }, [getProjectPayload, projectId, events, captures]);
 
   const activateClipPlayback = useCallback(
     (clip: ClipEvent, options?: { fromQueue?: boolean; holdManual?: boolean }) => {
@@ -1681,28 +1978,44 @@ export default function App() {
     }
   };
 
-  const handleFilesSelected = (fileList: FileList | null) => {
+  const handleFilesSelected = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
     const newItems: VideoFileItem[] = [];
-    Array.from(fileList).forEach((file) => {
-      if (file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|webm|mkv|avi)$/i)) {
+    const files = Array.from(fileList);
+
+    for (const file of files) {
+      if (file.type.startsWith('video/') || file.name.match(/\.(mp4|mov|webm|mkv|avi|m4v)$/i)) {
         const url = URL.createObjectURL(file);
-        newItems.push({
+        const item: VideoFileItem = {
           id: `vid-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
           name: file.name,
           url,
           duration: 0,
           size: file.size,
-        });
+        };
+        newItems.push(item);
+
+        // Guardar permanentemente en IndexedDB bajo este partido
+        try {
+          await saveVideoFile(projectId, file, {
+            id: item.id,
+            name: item.name,
+            duration: 0,
+            size: file.size,
+          });
+        } catch (dbErr) {
+          console.warn('Aviso guardando vídeo en IndexedDB:', dbErr);
+        }
       }
-    });
+    }
 
     if (newItems.length > 0) {
       setVideos((prev) => [...prev, ...newItems]);
       if (!activeVideoId) {
         setActiveVideoId(newItems[0].id);
       }
-      notify(`${newItems.length} vídeo(s) cargado(s) correctamente`);
+      refreshProjectsVideoSummary();
+      notify(`${newItems.length} vídeo(s) guardado(s) permanentemente en este partido`);
     }
   };
 
@@ -1710,7 +2023,7 @@ export default function App() {
     setIsGeneratingDemo(true);
     notify('Generando vídeo táctico de partido en el visor...');
     try {
-      const { url, duration: demoDur } = await createDemoMatchVideoBlobUrl();
+      const { url, duration: demoDur, blob } = await createDemoMatchVideoBlobUrl();
       const demoItem: VideoFileItem = {
         id: `demo-seneca-${Date.now()}`,
         name: 'Partido_Seneca_CF_Visor_Tactico.webm',
@@ -1718,9 +2031,24 @@ export default function App() {
         duration: demoDur,
         isDemo: true,
       };
+
+      // Guardar permanentemente en IndexedDB bajo este partido
+      try {
+        await saveVideoFile(projectId, blob, {
+          id: demoItem.id,
+          name: demoItem.name,
+          duration: demoDur,
+          size: blob.size,
+          isDemo: true,
+        });
+      } catch (dbErr) {
+        console.warn('Aviso guardando demo en IndexedDB:', dbErr);
+      }
+
       setVideos((prev) => [...prev, demoItem]);
       setActiveVideoId(demoItem.id);
       setDuration(demoDur);
+      refreshProjectsVideoSummary();
 
       if (
         markers.firstHalfStart === undefined &&
@@ -3799,24 +4127,57 @@ ${xmlInstances}
                 <span>Matriz Nacsport</span>
               </button>
 
-              <button
-                onClick={() => {
-                  fetchProjectsFromSupabase();
-                  setShowProjectsModal(true);
-                }}
-                className="h-[32px] px-2.5 bg-[#242424] hover:bg-[#323232] border border-[#3d3d3d] rounded text-xs flex items-center gap-1.5 text-gray-200 transition"
-                title="Gestionar partidos y sincronización con Supabase"
-              >
-                {supabaseStatus === 'synced' ? (
-                  <Cloud className="w-3.5 h-3.5 text-emerald-400" />
-                ) : supabaseStatus === 'syncing' ? (
-                  <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-                ) : (
-                  <CloudOff className="w-3.5 h-3.5 text-amber-400" />
-                )}
-                <span className="font-medium truncate max-w-[150px]">{projectName}</span>
-                <FolderOpen className="w-3.5 h-3.5 text-gray-400 ml-0.5" />
-              </button>
+              {/* Selector Rápido de Partido y Agrupación */}
+              <div className="flex items-center gap-1.5 bg-[#202020] border border-[#3d3d3d] rounded px-2 py-0.5 shadow-inner">
+                <span className="text-[10px] font-condensed font-black text-[#f5b800] uppercase tracking-wider hidden sm:inline">
+                  PARTIDO:
+                </span>
+                <select
+                  value={projectId}
+                  onChange={(e) => switchProject(e.target.value)}
+                  className="bg-[#141414] text-white text-xs font-semibold px-2 py-1 rounded border border-[#444] focus:border-[#cc2016] focus:outline-none max-w-[170px] sm:max-w-[210px] truncate cursor-pointer hover:border-gray-400 transition"
+                  title="Seleccionar y activar partido (muestra su vídeo de inmediato)"
+                >
+                  {savedProjects.map((p) => {
+                    const vInfo = projectsVideoSummary[p.id];
+                    const hasVid = (vInfo && vInfo.count > 0) || (p.id === projectId && videos.length > 0);
+                    return (
+                      <option key={p.id} value={p.id}>
+                        {p.name} {hasVid ? '🎥' : ''} ({p.events?.length || 0} cortes)
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <button
+                  onClick={() => createNewProject()}
+                  className="h-[26px] px-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[11px] font-bold flex items-center gap-1 transition shadow-sm"
+                  title="Crear un nuevo partido limpio"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span className="hidden md:inline">Nuevo</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    refreshProjectsVideoSummary();
+                    fetchProjectsFromSupabase();
+                    setShowProjectsModal(true);
+                  }}
+                  className="h-[26px] px-2 bg-[#2d2d2d] hover:bg-[#3d3d3d] text-gray-200 border border-gray-600 rounded text-[11px] font-medium flex items-center gap-1 transition"
+                  title="Gestor y agrupación de todos los partidos"
+                >
+                  {supabaseStatus === 'synced' ? (
+                    <Cloud className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : supabaseStatus === 'syncing' ? (
+                    <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                  ) : (
+                    <CloudOff className="w-3.5 h-3.5 text-amber-400" />
+                  )}
+                  <FolderOpen className="w-3.5 h-3.5 text-[#f5b800]" />
+                  <span className="hidden lg:inline">Partidos ({savedProjects.length})</span>
+                </button>
+              </div>
 
               {supabaseStatus === 'local_only' && (
                 <button
@@ -5550,18 +5911,38 @@ ${xmlInstances}
            ===================================================================== */}
         {!isBotoneraFullscreen && (
           <aside className="w-full lg:w-[400px] xl:w-[425px] bg-white flex flex-col shrink-0 overflow-y-auto max-h-[calc(100vh-98px)]">
-          {/* 1. SECCIÓN VÍDEOS */}
-          <div className="p-3 border-b border-gray-200">
-            <div className="flex items-center justify-between mb-2.5">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-[#cc2016] inline-block" />
-                <h2 className="font-condensed font-bold text-[15px] tracking-wider uppercase text-[#141414]">
-                  VÍDEOS
-                </h2>
+          {/* 1. SECCIÓN PARTIDO Y VÍDEOS GUARDADOS */}
+          <div className="p-3 border-b border-gray-200 bg-gray-50/50">
+            {/* Cabecera del Partido Actual */}
+            <div className="mb-2.5 pb-2 border-b border-gray-200">
+              <div className="flex items-center justify-between gap-1 mb-1">
+                <span className="text-[10px] font-condensed font-black uppercase text-[#cc2016] flex items-center gap-1">
+                  <span className="w-2 h-2 bg-[#cc2016] inline-block" />
+                  PARTIDO ACTUAL
+                </span>
+                <span className="text-[10px] font-bold text-gray-500">
+                  {events.length} cortes
+                </span>
+              </div>
+              <div className="text-xs font-bold text-gray-900 truncate" title={projectName}>
+                {projectName}
+              </div>
+              <div className="text-[11px] text-gray-500 truncate">
+                Rival: <span className="font-semibold text-gray-700">{rivalName || 'Rival FC'}</span> · {competition}
+              </div>
+            </div>
+
+            {/* Controles de Vídeo del Partido */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-1.5">
+                <Film className="w-3.5 h-3.5 text-[#cc2016]" />
+                <h3 className="font-condensed font-bold text-[13px] tracking-wider uppercase text-gray-800">
+                  VÍDEOS DEL PARTIDO ({videos.length})
+                </h3>
               </div>
               <button
                 onClick={() => setHideVideosPanel((prev) => !prev)}
-                className="w-[84px] h-[28px] bg-[#1666c0] hover:bg-[#1255a1] text-white text-xs font-semibold transition flex items-center justify-center"
+                className="w-[70px] h-[24px] bg-[#1666c0] hover:bg-[#1255a1] text-white text-[11px] font-semibold transition flex items-center justify-center rounded"
               >
                 {hideVideosPanel ? 'Mostrar' : 'Ocultar'}
               </button>
@@ -5569,47 +5950,81 @@ ${xmlInstances}
 
             {!hideVideosPanel && (
               <div>
-                <button
-                  onClick={() => fileInputRef.current?.click()}
-                  className="w-full py-2.5 px-3 bg-[#cc2016] hover:bg-[#a81810] text-white font-medium text-xs flex items-center justify-center gap-1.5 transition shadow-sm"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>+ Añadir vídeo</span>
-                </button>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 mb-2">
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="py-2 px-2.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-semibold text-xs flex items-center justify-center gap-1.5 transition shadow-sm rounded"
+                    title="Subir vídeo de este partido (se guarda permanentemente en IndexedDB)"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Añadir vídeo</span>
+                  </button>
+                  <button
+                    onClick={handleLoadDemoVideo}
+                    disabled={isGeneratingDemo}
+                    className="py-2 px-2.5 bg-[#141414] hover:bg-gray-800 text-[#f5b800] font-semibold text-xs flex items-center justify-center gap-1.5 transition shadow-sm rounded disabled:opacity-50"
+                    title="Generar vídeo táctico demo para este partido"
+                  >
+                    <span>⚡ Demo Táctico</span>
+                  </button>
+                </div>
 
-                {videos.length > 0 && (
-                  <div className="mt-2 space-y-1 max-h-[100px] overflow-y-auto">
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] px-2 py-1 rounded flex items-center gap-1.5 mb-2">
+                  <Check className="w-3 h-3 text-emerald-600 shrink-0" />
+                  <span>Los vídeos se guardan en el navegador y se mantienen al salir.</span>
+                </div>
+
+                {videos.length > 0 ? (
+                  <div className="space-y-1 max-h-[140px] overflow-y-auto">
                     {videos.map((v, idx) => (
                       <div
                         key={v.id}
                         onClick={() => setActiveVideoId(v.id)}
                         className={`flex items-center justify-between px-2.5 py-1.5 rounded text-xs cursor-pointer border transition ${
                           activeVideoId === v.id
-                            ? 'bg-[#cc2016]/10 border-[#cc2016] text-[#141414] font-semibold'
-                            : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                            ? 'bg-[#cc2016]/10 border-[#cc2016] text-[#141414] font-semibold ring-1 ring-[#cc2016]'
+                            : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
                         }`}
                       >
                         <div className="flex items-center gap-2 truncate">
                           <Film className="w-3.5 h-3.5 text-[#cc2016] shrink-0" />
-                          <span className="truncate">
-                            {idx + 1}. {v.name}
-                          </span>
+                          <div className="truncate">
+                            <span className="truncate block">
+                              {idx + 1}. {v.name}
+                            </span>
+                            <span className="text-[10px] text-emerald-600 font-medium">
+                              ● Guardado permanente
+                            </span>
+                          </div>
                         </div>
                         <button
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation();
+                            if (!window.confirm(`¿Eliminar el vídeo "${v.name}" de este partido?`)) return;
+                            try {
+                              await deleteVideoFile(v.id);
+                            } catch (err) {
+                              console.warn('Error borrando vídeo de IndexedDB:', err);
+                            }
                             const remaining = videos.filter((item) => item.id !== v.id);
                             setVideos(remaining);
                             if (activeVideoId === v.id) {
                               setActiveVideoId(remaining[0]?.id || null);
                             }
+                            refreshProjectsVideoSummary();
+                            notify('Vídeo eliminado');
                           }}
-                          className="text-gray-400 hover:text-red-600 ml-2"
+                          className="text-gray-400 hover:text-red-600 p-1 rounded hover:bg-red-50 ml-1 shrink-0"
+                          title="Eliminar vídeo de este partido"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-2.5 px-2 bg-white border border-dashed border-gray-300 rounded text-gray-500 text-[11px]">
+                    No hay vídeo asociado a este partido todavía. Añade un vídeo arriba para que se mantenga siempre que señales este partido.
                   </div>
                 )}
               </div>
@@ -8498,16 +8913,17 @@ ${xmlInstances}
          ===================================================================== */}
       {showProjectsModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-2xl w-full p-5 shadow-2xl border-t-4 border-[#cc2016]">
-            <div className="flex items-center justify-between pb-3 border-b border-gray-200 mb-4">
+          <div className="bg-white rounded-lg max-w-3xl w-full p-5 shadow-2xl border-t-4 border-[#cc2016] flex flex-col max-h-[90vh]">
+            {/* Cabecera */}
+            <div className="flex items-center justify-between pb-3 border-b border-gray-200 mb-3 shrink-0">
               <div className="flex items-center gap-2.5">
                 <img src="/seneca-shield.jpg" alt="Séneca CF" className="w-8 h-8 object-contain" />
                 <div>
                   <h3 className="font-condensed font-bold text-lg uppercase text-gray-900">
-                    PROYECTOS Y PARTIDOS - ANÁLISIS SÉNECA CF (SUPABASE CLOUD)
+                    GESTIÓN Y AGRUPACIÓN DE PARTIDOS - SÉNECA CF
                   </h3>
                   <p className="text-xs text-gray-500">
-                    Conectado a: <code className="text-[#cc2016]">aojlwavrjxxpzupwchxr.supabase.co</code>
+                    Cada partido guarda sus propios vídeos, cortes y dibujos de forma permanente en el navegador (IndexedDB).
                   </p>
                 </div>
               </div>
@@ -8516,64 +8932,260 @@ ${xmlInstances}
               </button>
             </div>
 
-            <div className="bg-gray-50 p-3 rounded border border-gray-200 mb-4">
-              <div className="text-xs font-bold uppercase text-gray-700 mb-2">Partido / Proyecto Actual</div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
-                <div>
-                  <label className="text-[11px] text-gray-500 block">Nombre del Proyecto</label>
-                  <input
-                    type="text"
-                    value={projectName}
-                    onChange={(e) => setProjectName(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs"
-                  />
+            {/* Contenido con scroll */}
+            <div className="overflow-y-auto space-y-4 pr-1">
+              {/* 1. Partido Actual */}
+              <div className="bg-gray-50 p-3.5 rounded border border-gray-200">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-xs font-bold uppercase text-gray-700 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>Datos del Partido Actualmente en Pantalla</span>
+                  </div>
+                  <span className="text-[11px] font-mono text-gray-500 bg-white px-2 py-0.5 rounded border border-gray-200">
+                    ID: {projectId}
+                  </span>
                 </div>
-                <div>
-                  <label className="text-[11px] text-gray-500 block">Club Rival</label>
-                  <input
-                    type="text"
-                    value={rivalName}
-                    onChange={(e) => setRivalName(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs"
-                  />
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-2.5">
+                  <div>
+                    <label className="text-[11px] font-medium text-gray-600 block mb-0.5">Nombre del Partido</label>
+                    <input
+                      type="text"
+                      value={projectName}
+                      onChange={(e) => setProjectName(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs focus:border-[#cc2016] focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-gray-600 block mb-0.5">Club Rival</label>
+                    <input
+                      type="text"
+                      value={rivalName}
+                      onChange={(e) => setRivalName(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs focus:border-[#cc2016] focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-gray-600 block mb-0.5">Competición / Categoría</label>
+                    <input
+                      type="text"
+                      value={competition}
+                      onChange={(e) => setCompetition(e.target.value)}
+                      className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs focus:border-[#cc2016] focus:outline-none"
+                    />
+                  </div>
                 </div>
-                <div>
-                  <label className="text-[11px] text-gray-500 block">Competición / Categoría</label>
-                  <input
-                    type="text"
-                    value={competition}
-                    onChange={(e) => setCompetition(e.target.value)}
-                    className="w-full border border-gray-300 rounded px-2.5 py-1.5 text-xs"
-                  />
+                <div className="flex items-center justify-between pt-1">
+                  <button
+                    onClick={() => createNewProject()}
+                    className="px-3 py-1.5 bg-[#141414] hover:bg-gray-800 text-[#f5b800] text-xs font-bold rounded flex items-center gap-1.5 transition shadow-sm"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ Crear Nuevo Partido</span>
+                  </button>
+
+                  <div className="text-[11px] text-gray-500">
+                    {videos.length > 0 ? (
+                      <span className="text-emerald-700 font-semibold">
+                        🎥 {videos.length} vídeo(s) asociado(s) en este partido
+                      </span>
+                    ) : (
+                      <span className="text-amber-700">⚪ Sin vídeo en este partido (añádelo en el visor)</span>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="flex items-center justify-between pt-1">
+
+              {/* 2. Lista de Partidos Guardados (Agrupación) */}
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-1.5">
+                    <FolderKanban className="w-4 h-4 text-[#cc2016]" />
+                    <h4 className="font-condensed font-bold text-sm uppercase text-gray-900">
+                      PARTIDOS GUARDADOS ({savedProjects.length})
+                    </h4>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative">
+                      <input
+                        type="text"
+                        placeholder="Buscar partido o rival..."
+                        value={projectSearchTerm}
+                        onChange={(e) => setProjectSearchTerm(e.target.value)}
+                        className="pl-7 pr-2.5 py-1 border border-gray-300 rounded text-xs w-48 focus:border-[#cc2016] focus:outline-none"
+                      />
+                      <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2 top-2" />
+                    </div>
+                    <button
+                      onClick={async () => {
+                        await fetchProjectsFromSupabase();
+                        await refreshProjectsVideoSummary();
+                        notify('Partidos sincronizados y actualizados');
+                      }}
+                      className="px-2.5 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-semibold rounded flex items-center gap-1 border border-gray-300"
+                      title="Sincronizar y actualizar lista"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Actualizar</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-2 max-h-[320px] overflow-y-auto">
+                  {savedProjects
+                    .filter((p) => {
+                      if (!projectSearchTerm.trim()) return true;
+                      const q = projectSearchTerm.toLowerCase();
+                      return (
+                        (p.name && p.name.toLowerCase().includes(q)) ||
+                        (p.rival && p.rival.toLowerCase().includes(q)) ||
+                        (p.competition && p.competition.toLowerCase().includes(q))
+                      );
+                    })
+                    .map((p) => {
+                      const isActive = p.id === projectId;
+                      const vInfo = projectsVideoSummary[p.id];
+                      const hasVideo = (vInfo && vInfo.count > 0) || (isActive && videos.length > 0);
+                      const videoCount = isActive ? videos.length : vInfo?.count || 0;
+                      const videoNames = isActive ? videos.map((v) => v.name) : vInfo?.videoNames || [];
+
+                      return (
+                        <div
+                          key={p.id}
+                          className={`p-3 rounded-lg border transition ${
+                            isActive
+                              ? 'bg-red-50/40 border-[#cc2016] shadow-sm'
+                              : 'bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50/50'
+                          }`}
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                {isActive && (
+                                  <span className="bg-[#cc2016] text-white text-[10px] font-bold px-1.5 py-0.5 rounded tracking-wide uppercase">
+                                    EN VISOR
+                                  </span>
+                                )}
+                                <span className="font-bold text-sm text-gray-900 truncate">
+                                  {p.name}
+                                </span>
+                              </div>
+
+                              <div className="text-xs text-gray-600 flex items-center gap-3 flex-wrap">
+                                <span>
+                                  Rival: <strong className="text-gray-800">{p.rival || 'Rival FC'}</strong>
+                                </span>
+                                <span>·</span>
+                                <span>{p.competition || 'División de Honor'}</span>
+                                <span>·</span>
+                                <span className="text-gray-500">{p.match_date || 'Sin fecha'}</span>
+                              </div>
+
+                              {/* Indicadores de contenido del partido */}
+                              <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                                {hasVideo ? (
+                                  <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-[10px] font-semibold px-2 py-0.5 rounded flex items-center gap-1">
+                                    <Film className="w-3 h-3 text-emerald-600" />
+                                    <span>
+                                      Vídeo guardado permanentemente: {videoNames.join(', ') || `${videoCount} vídeo(s)`}
+                                    </span>
+                                  </span>
+                                ) : (
+                                  <span className="bg-gray-100 text-gray-500 text-[10px] px-2 py-0.5 rounded flex items-center gap-1">
+                                    ⚪ Sin vídeo guardado
+                                  </span>
+                                )}
+
+                                <span className="bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-semibold px-2 py-0.5 rounded">
+                                  ✂ {p.events?.length || 0} cortes clasificados
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Botones de acción para el partido */}
+                            <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                              {!isActive ? (
+                                <button
+                                  onClick={async () => {
+                                    await switchProject(p.id);
+                                    setShowProjectsModal(false);
+                                  }}
+                                  className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-bold rounded flex items-center gap-1 shadow-sm transition"
+                                  title="Abrir este partido y reproducir su vídeo"
+                                >
+                                  <Play className="w-3.5 h-3.5 fill-current" />
+                                  <span>Abrir Partido</span>
+                                </button>
+                              ) : (
+                                <span className="text-xs font-bold text-[#cc2016] px-3 py-1 bg-white border border-[#cc2016] rounded">
+                                  ✓ Seleccionado
+                                </span>
+                              )}
+
+                              <button
+                                onClick={() => deleteProject(p.id)}
+                                className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded border border-gray-200 hover:border-red-300 transition"
+                                title="Eliminar este partido y todos sus vídeos y cortes guardados"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                  {savedProjects.length === 0 && (
+                    <div className="text-center py-6 text-gray-500 text-xs">
+                      No hay partidos guardados todavía. Pulsa "+ Crear Nuevo Partido" para empezar.
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Pie del Modal */}
+            <div className="pt-3 border-t border-gray-200 flex items-center justify-between shrink-0 mt-3">
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <span>Estado Supabase Cloud:</span>
+                {supabaseStatus === 'synced' ? (
+                  <span className="text-emerald-600 font-bold flex items-center gap-1">
+                    <Cloud className="w-3.5 h-3.5" /> Conectado y Sincronizado
+                  </span>
+                ) : supabaseStatus === 'syncing' ? (
+                  <span className="text-amber-600 font-bold flex items-center gap-1">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Sincronizando...
+                  </span>
+                ) : (
+                  <span className="text-amber-700 font-bold flex items-center gap-1">
+                    <CloudOff className="w-3.5 h-3.5" /> Modo Local (IndexedDB activo)
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
                 <button
-                  onClick={() => {
-                    const newId = `seneca-${Date.now()}`;
-                    setProjectId(newId);
-                    setProjectName(`Séneca CF vs Nuevo Rival (${new Date().toLocaleDateString()})`);
-                    setEvents([]);
-                    setCaptures([]);
-                    setDrawings([]);
-                    setMarkers({});
-                    notify('Nuevo proyecto de partido creado');
+                  onClick={async () => {
+                    const currentPayload = getProjectPayload();
+                    updateProjectInCatalog(currentPayload);
+                    try {
+                      await supabase.from('seneca_projects').upsert(currentPayload, { onConflict: 'id' });
+                      setSupabaseStatus('synced');
+                    } catch {
+                      setSupabaseStatus('local_only');
+                    }
+                    notify('Partido guardado y sincronizado correctamente');
                   }}
-                  className="px-3 py-1.5 bg-[#141414] hover:bg-gray-800 text-[#f5b800] text-xs font-semibold rounded flex items-center gap-1"
+                  className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-bold rounded flex items-center gap-1 shadow-sm transition"
                 >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>Crear Nuevo Partido</span>
+                  <Save className="w-3.5 h-3.5" />
+                  <span>Guardar Todo Ahora</span>
                 </button>
 
                 <button
-                  onClick={async () => {
-                    await fetchProjectsFromSupabase();
-                    notify('Sincronizado con Supabase');
-                  }}
-                  className="px-3 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-semibold rounded flex items-center gap-1"
+                  onClick={() => setShowProjectsModal(false)}
+                  className="px-4 py-1.5 bg-gray-200 hover:bg-gray-300 text-gray-800 text-xs font-semibold rounded transition"
                 >
-                  <Save className="w-3.5 h-3.5" />
-                  <span>Guardar y Sincronizar Ahora</span>
+                  Cerrar
                 </button>
               </div>
             </div>

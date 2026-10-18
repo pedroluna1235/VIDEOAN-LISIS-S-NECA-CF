@@ -1,5 +1,5 @@
 // Generador de vídeo sintético de partido táctico 2D para probar "Usar el vídeo del visor" al instante
-export async function createDemoMatchVideoBlobUrl(): Promise<{ url: string; duration: number }> {
+export async function createDemoMatchVideoBlobUrl(): Promise<{ url: string; duration: number; blob: Blob }> {
   const canvas = document.createElement('canvas');
   canvas.width = 1280;
   canvas.height = 720;
@@ -24,7 +24,7 @@ export async function createDemoMatchVideoBlobUrl(): Promise<{ url: string; dura
     recorder.onstop = () => {
       const blob = new Blob(chunks, { type: mimeType });
       const url = URL.createObjectURL(blob);
-      resolve({ url, duration: 8 });
+      resolve({ url, duration: 8, blob });
     };
 
     recorder.start();
