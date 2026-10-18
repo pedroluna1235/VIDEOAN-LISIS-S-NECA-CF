@@ -449,9 +449,11 @@ export default function App() {
 
   const pushHistory = useCallback(
     (next: Partial<HistorySnapshot>) => {
+      const rawEvents = next.events !== undefined ? next.events : events;
+      const rawCaptures = next.captures !== undefined ? next.captures : captures;
       const snap: HistorySnapshot = {
-        events: next.events !== undefined ? next.events : events,
-        captures: next.captures !== undefined ? next.captures : captures,
+        events: rawEvents.map(({ drawingDataUrl, ...rest }) => rest as ClipEvent),
+        captures: rawCaptures.map(({ dataUrl, ...rest }) => rest as CaptureItem),
         drawings: next.drawings !== undefined ? next.drawings : drawings,
         markers: next.markers !== undefined ? next.markers : markers,
       };
@@ -581,31 +583,18 @@ export default function App() {
       updated_at: new Date().toISOString(),
     };
 
-    try {
-      localStorage.setItem('seneca_cf_current_project', JSON.stringify(projectPayload));
-    } catch {
-      try {
-        const lightPayload: SenecaProject = {
-          ...projectPayload,
-          events: events.map(({ drawingDataUrl, ...rest }) => rest),
-          captures: captures.slice(0, 6),
-        };
-        localStorage.setItem('seneca_cf_current_project', JSON.stringify(lightPayload));
-      } catch {
-        try {
-          const minimalPayload: SenecaProject = {
-            ...projectPayload,
-            events: events.map(({ drawingDataUrl, ...rest }) => rest),
-            captures: [],
-          };
-          localStorage.setItem('seneca_cf_current_project', JSON.stringify(minimalPayload));
-        } catch (err) {
-          console.warn('No se pudo guardar en localStorage por límite de cuota:', err);
-        }
-      }
-    }
-
     const timer = setTimeout(async () => {
+      try {
+        const storagePayload: SenecaProject = {
+          ...projectPayload,
+          events: events.map(({ drawingDataUrl, ...rest }) => rest as ClipEvent),
+          captures: captures.map(({ dataUrl, ...rest }) => rest as CaptureItem),
+        };
+        localStorage.setItem('seneca_cf_current_project', JSON.stringify(storagePayload));
+      } catch (err) {
+        console.warn('Aviso guardado en localStorage:', err);
+      }
+
       try {
         const { error } = await supabase.from('seneca_projects').upsert(projectPayload, { onConflict: 'id' });
         if (!error) {
@@ -897,10 +886,6 @@ export default function App() {
           );
           if (hasNewKeyframes) {
             drawingsRef.current = updatedActions;
-            if (performance.now() - lastStateSync > 450) {
-              lastStateSync = performance.now();
-              setDrawings(updatedActions);
-            }
           }
           const ctx = canvas.getContext('2d');
           if (ctx) {
@@ -3908,7 +3893,10 @@ ${xmlInstances}
                             refreshVideoCropBounds(videoRef.current, true);
                           }
                         }}
-                        onPause={() => setIsPlaying(false)}
+                        onPause={() => {
+                          setIsPlaying(false);
+                          setDrawings([...drawingsRef.current]);
+                        }}
                         onClick={() => {
                           if (!drawingMode) togglePlay();
                         }}

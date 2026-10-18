@@ -10,6 +10,30 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script>
+      window.addEventListener('error', function(e) {
+        var box = document.getElementById('debug-error-box');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'debug-error-box';
+          box.style.cssText = 'position:fixed;top:10px;left:10px;right:10px;padding:12px 16px;background:#991b1b;color:#fff;font-family:monospace;font-size:12px;z-index:999999;white-space:pre-wrap;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+          document.body ? document.body.appendChild(box) : document.documentElement.appendChild(box);
+        }
+        var msg = e.error && e.error.stack ? e.error.stack : (e.message || String(e));
+        box.textContent = 'AVISO VISOR: ' + msg;
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        var box = document.getElementById('debug-error-box');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'debug-error-box';
+          box.style.cssText = 'position:fixed;top:10px;left:10px;right:10px;padding:12px 16px;background:#991b1b;color:#fff;font-family:monospace;font-size:12px;z-index:999999;white-space:pre-wrap;border-radius:6px;box-shadow:0 4px 12px rgba(0,0,0,0.5);';
+          document.body ? document.body.appendChild(box) : document.documentElement.appendChild(box);
+        }
+        var reason = e.reason && (e.reason.stack || e.reason.message) ? (e.reason.stack || e.reason.message) : String(e.reason);
+        box.textContent = 'AVISO PROMESA: ' + reason;
+      });
+    </script>
   </head>
   <body class="bg-[#f4f4f4] text-[#1a1a1a] antialiased selection:bg-[#cc2016] selection:text-white">
     <div id="root"></div>
