@@ -153,7 +153,8 @@ export default function App() {
   const [showSqlModal, setShowSqlModal] = useState<boolean>(false);
   const [showTutorialModal, setShowTutorialModal] = useState<boolean>(false);
   const [showMatrixModal, setShowMatrixModal] = useState<boolean>(false);
-  const [matrixViewMode, setMatrixViewMode] = useState<'completa' | 'posiciones' | 'categorias' | 'cruce'>('completa');
+  const [matrixViewMode, setMatrixViewMode] = useState<'completa' | 'posiciones' | 'categorias' | 'cruce' | 'partidos'>('completa');
+  const [matrixSelectedProjectIds, setMatrixSelectedProjectIds] = useState<string[]>([]);
   const [supabaseStatus, setSupabaseStatus] = useState<'synced' | 'syncing' | 'local_only'>('syncing');
   const [statusMessage, setStatusMessage] = useState<string>('');
 
@@ -2779,6 +2780,47 @@ export default function App() {
     return Array.from(map.values());
   }, [filteredEvents, eventsGroupBy, getClipOutcome]);
 
+  // Partidos señalados para unir en la Matriz
+  const activeMatrixProjectIds = useMemo(() => {
+    if (matrixSelectedProjectIds.length > 0) return matrixSelectedProjectIds;
+    return [projectId];
+  }, [matrixSelectedProjectIds, projectId]);
+
+  // Cortes unidos de todos los partidos señalados para la Matriz
+  const matrixClips = useMemo(() => {
+    const list: (ClipEvent & { matchId?: string; matchName?: string; matchRival?: string; matchDate?: string })[] = [];
+
+    // 1. Si el partido actual está señalado, incluimos sus cortes en memoria
+    if (activeMatrixProjectIds.includes(projectId)) {
+      events.forEach((ev) => {
+        list.push({
+          ...ev,
+          matchId: projectId,
+          matchName: projectName,
+          matchRival: rivalName,
+          matchDate: new Date().toISOString().split('T')[0],
+        });
+      });
+    }
+
+    // 2. Para los demás partidos señalados, incluimos sus cortes guardados
+    savedProjects.forEach((p) => {
+      if (p.id !== projectId && activeMatrixProjectIds.includes(p.id) && Array.isArray(p.events)) {
+        p.events.forEach((ev) => {
+          list.push({
+            ...ev,
+            matchId: p.id,
+            matchName: p.name,
+            matchRival: p.rival,
+            matchDate: p.match_date,
+          });
+        });
+      }
+    });
+
+    return list;
+  }, [activeMatrixProjectIds, projectId, projectName, rivalName, events, savedProjects]);
+
   // Añadir cortes seleccionados o un grupo entero a una Lista de Presentación (Playlist Nacsport)
   const addClipsToActivePlaylist = (clipsToAdd: ClipEvent[]) => {
     if (clipsToAdd.length === 0) return;
@@ -4181,10 +4223,15 @@ ${xmlInstances}
           {playingQueue && (
             <div className="bg-[#cc2016] text-white px-3 py-1.5 text-xs font-bold flex items-center justify-between shrink-0 shadow-sm">
               <div className="flex items-center gap-2">
-                <ListVideo className="w-4 h-4 animate-pulse" />
-                <span>
-                  Reproduciendo Grupo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
-                  {playingQueue[playingQueueIndex]?.name}
+                <ListVideo className="w-4 h-4 animate-pulse shrink-0" />
+                <span className="truncate">
+                  Reproduciendo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
+                  <span className="text-[#f5b800]">{playingQueue[playingQueueIndex]?.name}</span>
+                  {(playingQueue[playingQueueIndex] as any)?.matchName && (
+                    <span className="ml-2 bg-black/40 px-2 py-0.5 rounded text-[11px] font-normal text-white">
+                      ⚽ {(playingQueue[playingQueueIndex] as any).matchName}
+                    </span>
+                  )}
                 </span>
               </div>
               <button
@@ -7502,6 +7549,81 @@ ${xmlInstances}
               </button>
             </div>
 
+            {/* SELECTOR Y AGRUPADOR DE PARTIDOS SEÑALADOS PARA LA MATRIZ */}
+            <div className="bg-gray-50 border border-gray-200 rounded p-2.5 mb-3 shrink-0">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-condensed font-bold uppercase tracking-wider text-gray-800 flex items-center gap-1.5">
+                    <FolderKanban className="w-3.5 h-3.5 text-[#cc2016]" />
+                    PARTIDOS SEÑALADOS EN LA MATRIZ ({activeMatrixProjectIds.length}/{savedProjects.length}):
+                  </span>
+                  <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold px-2 py-0.5 rounded">
+                    {matrixClips.length} cortes unidos en esta matriz
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-1.5 text-xs">
+                  <button
+                    onClick={() => setMatrixSelectedProjectIds(savedProjects.map((p) => p.id))}
+                    className="px-2 py-0.5 bg-white border border-gray-300 hover:bg-gray-100 rounded text-[11px] font-semibold text-gray-700 transition"
+                  >
+                    Señalar todos los partidos
+                  </button>
+                  <button
+                    onClick={() => setMatrixSelectedProjectIds([projectId])}
+                    className="px-2 py-0.5 bg-white border border-gray-300 hover:bg-gray-100 rounded text-[11px] font-semibold text-gray-700 transition"
+                  >
+                    Solo partido actual
+                  </button>
+                </div>
+              </div>
+
+              {/* Píldoras clicables para señalar / deseleccionar cada partido */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {savedProjects.map((p) => {
+                  const isSelected = activeMatrixProjectIds.includes(p.id);
+                  const isCurrent = p.id === projectId;
+                  const count = isCurrent ? events.length : p.events?.length || 0;
+
+                  return (
+                    <button
+                      key={p.id}
+                      onClick={() => {
+                        if (isSelected) {
+                          if (activeMatrixProjectIds.length > 1) {
+                            setMatrixSelectedProjectIds(activeMatrixProjectIds.filter((id) => id !== p.id));
+                          }
+                        } else {
+                          setMatrixSelectedProjectIds([...activeMatrixProjectIds, p.id]);
+                        }
+                      }}
+                      className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
+                        isSelected
+                          ? 'bg-[#cc2016] text-white border-[#cc2016] shadow-sm'
+                          : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100 hover:text-gray-900'
+                      }`}
+                      title={`Haz clic para ${isSelected ? 'deseleccionar' : 'señalar e incluir'} este partido en la matriz`}
+                    >
+                      <span className="font-bold">{isSelected ? '✓' : '+'}</span>
+                      <span className="truncate max-w-[160px]">{p.name}</span>
+                      <span
+                        className={`text-[10px] px-1 py-0.2 rounded font-bold ${
+                          isSelected ? 'bg-white/20 text-white' : 'bg-gray-200 text-gray-700'
+                        }`}
+                      >
+                        {count} cortes
+                      </span>
+                      {isCurrent && (
+                        <span className="text-[9px] uppercase tracking-wider bg-[#f5b800] text-gray-950 px-1 rounded font-black">
+                          ACTUAL
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Pestañas de vista de la Matriz */}
             <div className="flex flex-wrap items-center justify-between gap-2 mb-3 shrink-0">
               <div className="flex flex-wrap items-center gap-1.5">
@@ -7545,18 +7667,29 @@ ${xmlInstances}
                 >
                   Cruce Categoría × Posición
                 </button>
+                <button
+                  onClick={() => setMatrixViewMode('partidos')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition flex items-center gap-1 ${
+                    matrixViewMode === 'partidos'
+                      ? 'bg-[#cc2016] text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  <span>Comparativa por Partidos Señalados ({activeMatrixProjectIds.length})</span>
+                </button>
               </div>
 
               {/* Resumen global rápido */}
               <div className="flex items-center gap-2 text-xs">
                 <span className="px-2.5 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold">
-                  ✓ Con Acierto: {events.filter((e) => getClipOutcome(e.descriptors) === 'positivo').length}
+                  ✓ Con Acierto: {matrixClips.filter((e) => getClipOutcome(e.descriptors) === 'positivo').length}
                 </span>
                 <span className="px-2.5 py-1 rounded bg-red-50 border border-red-200 text-red-800 font-bold">
-                  ✕ No Acertadas: {events.filter((e) => getClipOutcome(e.descriptors) === 'negativo').length}
+                  ✕ No Acertadas: {matrixClips.filter((e) => getClipOutcome(e.descriptors) === 'negativo').length}
                 </span>
                 <span className="px-2.5 py-1 rounded bg-gray-100 border border-gray-300 text-gray-700 font-bold">
-                  Total Cortes: {events.length}
+                  Total Cortes Unidos: {matrixClips.length}
                 </span>
               </div>
             </div>
@@ -7568,13 +7701,13 @@ ${xmlInstances}
               {(matrixViewMode === 'completa' || matrixViewMode === 'posiciones') && (() => {
                 const extraPositionsInEvents = Array.from(
                   new Set(
-                    events
+                    matrixClips
                       .map((e) => (e.player || '').trim())
                       .filter((p) => p !== '' && !allAvailablePlayers.includes(p))
                   )
                 );
                 const positionRows = [...allAvailablePlayers, ...extraPositionsInEvents];
-                const unassignedClips = events.filter((e) => !e.player || !e.player.trim());
+                const unassignedClips = matrixClips.filter((e) => !e.player || !e.player.trim());
 
                 const renderOutcomePlayCell = (clips: ClipEvent[], badgeColor: string, labelPrefix?: string) => (
                   <td className="p-2 border border-gray-200 text-center">
@@ -7636,7 +7769,7 @@ ${xmlInstances}
                       </thead>
                       <tbody className="divide-y divide-gray-200">
                         {positionRows.map((pos) => {
-                          const allPos = events.filter((e) => (e.player || '').trim() === pos);
+                          const allPos = matrixClips.filter((e) => (e.player || '').trim() === pos);
                           const aciertos = allPos.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
                           const noAcertadas = allPos.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
                           const sinMarcar = allPos.filter((e) => getClipOutcome(e.descriptors) === 'neutro');
@@ -7840,7 +7973,7 @@ ${xmlInstances}
                     </thead>
                     <tbody className="divide-y divide-gray-200">
                       {tagCategories.map((cat) => {
-                        const allCat = events.filter((e) => e.category === cat.name);
+                        const allCat = matrixClips.filter((e) => e.category === cat.name);
                         const sen1 = allCat.filter(
                           (e) => e.team === 'Séneca CF' && (e.half || '1ª Parte') === '1ª Parte'
                         );
@@ -8014,7 +8147,7 @@ ${xmlInstances}
                               <span>{cat.name}</span>
                             </td>
                             {allAvailablePlayers.map((pos) => {
-                              const cellClips = events.filter(
+                              const cellClips = matrixClips.filter(
                                 (e) => e.category === cat.name && (e.player || '').trim() === pos
                               );
                               const okClips = cellClips.filter(
@@ -8077,16 +8210,146 @@ ${xmlInstances}
                   </div>
                 </div>
               )}
+
+              {/* =================================================================
+                  BLOQUE 4: MATRIZ COMPARATIVA Y UNIÓN POR PARTIDOS SEÑALADOS
+                 ================================================================= */}
+              {matrixViewMode === 'partidos' && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-condensed font-bold text-sm uppercase tracking-wider text-gray-900 flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-purple-700" />
+                      <span>MATRIZ COMPARATIVA DE PARTIDOS SEÑALADOS — CORTES UNIDOS Y POR PARTIDO</span>
+                    </h4>
+                    <span className="text-[11px] text-gray-500">
+                      Unión consolidada de {activeMatrixProjectIds.length} partidos. Pulsa en cualquier casilla para ver los cortes.
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#15181d] text-white font-condensed uppercase tracking-wider text-sm">
+                          <th className="p-2.5 text-left border border-gray-700 sticky left-0 bg-[#15181d] z-10">
+                            Categoría / Acción
+                          </th>
+                          {activeMatrixProjectIds.map((pId) => {
+                            const proj =
+                              pId === projectId
+                                ? { name: projectName, rival: rivalName }
+                                : savedProjects.find((p) => p.id === pId);
+                            const isCur = pId === projectId;
+                            return (
+                              <th
+                                key={pId}
+                                className={`p-2 border border-gray-700 text-center min-w-[130px] ${
+                                  isCur ? 'bg-[#2b1f1f] text-[#f5b800]' : 'bg-[#1e2533]'
+                                }`}
+                              >
+                                <div className="font-bold truncate max-w-[140px] mx-auto">
+                                  {proj?.name || 'Partido'}
+                                </div>
+                                <div className="text-[10px] text-gray-400 font-normal">
+                                  vs {proj?.rival || 'Rival FC'}
+                                </div>
+                              </th>
+                            );
+                          })}
+                          <th className="p-2.5 text-center border border-gray-700 bg-[#cc2016] min-w-[110px]">
+                            TOTAL UNIDO
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {tagCategories.map((cat) => {
+                          const allCatClips = matrixClips.filter((e) => e.category === cat.name);
+                          return (
+                            <tr key={cat.id} className="hover:bg-gray-50">
+                              <td className="p-2.5 border border-gray-200 font-semibold sticky left-0 bg-white z-10 flex items-center gap-2">
+                                <span
+                                  className="w-3 h-3 rounded-sm shrink-0"
+                                  style={{ backgroundColor: cat.color }}
+                                />
+                                <span>{cat.name}</span>
+                              </td>
+                              {activeMatrixProjectIds.map((pId) => {
+                                const matchClips = matrixClips.filter(
+                                  (e) => e.category === cat.name && e.matchId === pId
+                                );
+                                const ok = matchClips.filter(
+                                  (e) => getClipOutcome(e.descriptors) === 'positivo'
+                                ).length;
+                                const fail = matchClips.filter(
+                                  (e) => getClipOutcome(e.descriptors) === 'negativo'
+                                ).length;
+                                return (
+                                  <td key={pId} className="p-2 border border-gray-200 text-center">
+                                    {matchClips.length > 0 ? (
+                                      <div className="inline-flex items-center gap-1.5">
+                                        <button
+                                          onClick={() => {
+                                            setShowMatrixModal(false);
+                                            startPlayingClipQueue(matchClips);
+                                          }}
+                                          className="px-2 py-0.5 rounded bg-gray-900 text-white font-bold text-xs hover:bg-[#cc2016] transition flex items-center gap-1 shadow-sm"
+                                          title={`Reproducir ${matchClips.length} cortes de ${cat.name} en este partido`}
+                                        >
+                                          <Play className="w-2.5 h-2.5 fill-current" />
+                                          <span>{matchClips.length}</span>
+                                        </button>
+                                        <span className="text-[10px] text-emerald-600 font-semibold">✓{ok}</span>
+                                        <span className="text-[10px] text-red-600 font-semibold">✕{fail}</span>
+                                      </div>
+                                    ) : (
+                                      <span className="text-gray-300">0</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td className="p-2.5 border border-gray-200 text-center bg-gray-50 font-bold">
+                                {allCatClips.length > 0 ? (
+                                  <button
+                                    onClick={() => {
+                                      setShowMatrixModal(false);
+                                      startPlayingClipQueue(allCatClips);
+                                    }}
+                                    className="px-3 py-1 rounded bg-[#cc2016] text-white font-bold text-xs hover:bg-[#a81810] shadow-sm transition inline-flex items-center gap-1"
+                                    title={`Reproducir los ${allCatClips.length} cortes unidos de ${cat.name} de todos los partidos señalados`}
+                                  >
+                                    <Play className="w-3 h-3 fill-current" />
+                                    <span>{allCatClips.length}</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-gray-300">0</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="pt-3 border-t border-gray-200 mt-3 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => exportEventsToCSV(projectName)}
+                  onClick={() =>
+                    exportEventsToCSV(
+                      activeMatrixProjectIds.length > 1
+                        ? `Matriz_${activeMatrixProjectIds.length}_Partidos_Seneca_CF`
+                        : projectName,
+                      matrixClips
+                    )
+                  }
                   className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded flex items-center gap-1.5"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Descargar Matriz CSV (Excel con Posiciones y Acierto)</span>
+                  <span>
+                    Descargar Matriz CSV Excel ({activeMatrixProjectIds.length > 1 ? `${activeMatrixProjectIds.length} partidos unidos` : 'Partido actual'})
+                  </span>
                 </button>
                 <button
                   onClick={exportEventsToNacsportXML}
