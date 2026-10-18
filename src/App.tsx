@@ -9,11 +9,13 @@ import {
   RosterPlayerItem,
   MatchMarkers,
   TagCategory,
+  BotoneraTemplate,
   PresentationPlaylist,
   SenecaProject,
   DEFAULT_TAG_CATEGORIES,
   DEFAULT_ROSTER_PLAYERS,
   DEFAULT_PLAYLISTS,
+  DEFAULT_BOTONERA_TEMPLATES,
   NACSPORT_DESCRIPTORS,
   SENECA_PLAYERS,
 } from './supabaseClient';
@@ -86,6 +88,15 @@ import {
   Footprints,
   Radar,
   ShieldAlert,
+  Maximize2,
+  Minimize2,
+  Sliders,
+  LayoutGrid,
+  Keyboard,
+  Radio,
+  Palette,
+  Settings,
+  Tv,
 } from 'lucide-react';
 
 interface HistorySnapshot {
@@ -341,8 +352,76 @@ export default function App() {
   const [selectedPlayerTag, setSelectedPlayerTag] = useState<string>('');
   const [activeDescriptors, setActiveDescriptors] = useState<string[]>([]);
 
-  // PWA Install Prompt
-  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  // =========================================================================
+  // BOTONERA NACSPORT: PLANTILLAS, CONSTRUCTOR Y PANTALLA COMPLETA
+  // =========================================================================
+  const [botoneraTemplates, setBotoneraTemplates] = useState<BotoneraTemplate[]>(() => {
+    try {
+      const local = localStorage.getItem('seneca_botonera_templates');
+      if (local) return JSON.parse(local);
+    } catch {}
+    return DEFAULT_BOTONERA_TEMPLATES;
+  });
+  const [activeTemplateId, setActiveTemplateId] = useState<string>('tpl-seneca-pro');
+  const [customDescriptors, setCustomDescriptors] = useState<string[]>(() => {
+    try {
+      const local = localStorage.getItem('seneca_custom_descriptors');
+      if (local) return JSON.parse(local);
+    } catch {}
+    return NACSPORT_DESCRIPTORS;
+  });
+  const [isBotoneraFullscreen, setIsBotoneraFullscreen] = useState<boolean>(false);
+  const [botoneraFullscreenLayout, setBotoneraFullscreenLayout] = useState<'split_video' | 'board_only'>('split_video');
+  const [showBotoneraBuilderModal, setShowBotoneraBuilderModal] = useState<boolean>(false);
+  const [builderTab, setBuilderTab] = useState<'categorias' | 'descriptores' | 'diseno' | 'plantillas'>('categorias');
+  const [directOneClickMode, setDirectOneClickMode] = useState<boolean>(true);
+  const [botoneraColumns, setBotoneraColumns] = useState<number>(5);
+  const [botoneraButtonSize, setBotoneraButtonSize] = useState<'sm' | 'md' | 'lg'>('md');
+  const [showPitchInBotonera, setShowPitchInBotonera] = useState<boolean>(true);
+  const [showPlayersInBotonera, setShowPlayersInBotonera] = useState<boolean>(true);
+  const [showDescriptorsInBotonera, setShowDescriptorsInBotonera] = useState<boolean>(true);
+  const [activeManualRecordings, setActiveManualRecordings] = useState<
+    Record<
+      string,
+      {
+        startTime: number;
+        team: 'Séneca CF' | 'Rival';
+        player?: string;
+        zone?: string;
+        descriptors: string[];
+      }
+    >
+  >({});
+  const [lastDirectTaggedClipId, setLastDirectTaggedClipId] = useState<string | null>(null);
+
+  // Campos para crear nueva categoría en el constructor de botonera
+  const [newCatName, setNewCatName] = useState<string>('');
+  const [newCatColor, setNewCatColor] = useState<string>('#cc2016');
+  const [newCatShortcut, setNewCatShortcut] = useState<string>('');
+  const [newCatPreRoll, setNewCatPreRoll] = useState<number>(5);
+  const [newCatPostRoll, setNewCatPostRoll] = useState<number>(5);
+  const [newCatType, setNewCatType] = useState<'Ataque' | 'Defensa' | 'Transición' | 'ABP' | 'Resultado'>('Ataque');
+  const [newCatMode, setNewCatMode] = useState<'auto' | 'manual'>('auto');
+  const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+
+  // Campo para nuevo descriptor
+  const [newDescriptorInput, setNewDescriptorInput] = useState<string>('');
+
+  // Campo para nueva plantilla
+  const [newTemplateNameInput, setNewTemplateNameInput] = useState<string>('');
+
+  // Guardar plantillas y descriptores en LocalStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('seneca_botonera_templates', JSON.stringify(botoneraTemplates));
+    } catch {}
+  }, [botoneraTemplates]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('seneca_custom_descriptors', JSON.stringify(customDescriptors));
+    } catch {}
+  }, [customDescriptors]);
 
   useEffect(() => {
     const img = new Image();
