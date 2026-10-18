@@ -133,30 +133,35 @@ export function renderDrawingActions(
   const { currentTime, selectedId, ignoreTimeVisibility = false, videoElement, senecaLogoImg } = options;
 
   actions.forEach((action) => {
-    if (!action.points || action.points.length === 0) return;
+    try {
+      if (!action.points || action.points.length === 0) return;
 
-    // Comprobar si la acción es visible en el segundo actual (según "Visible durante: 8 s")
-    if (!ignoreTimeVisibility && action.visibleDuration > 0) {
-      const diff = currentTime - action.timestamp;
-      if (diff < -0.25 || diff > action.visibleDuration) {
-        return;
+      // Comprobar si la acción es visible en el segundo actual (según "Visible durante: 8 s")
+      if (!ignoreTimeVisibility && action.visibleDuration > 0) {
+        const diff = currentTime - action.timestamp;
+        if (diff < -0.25 || diff > action.visibleDuration) {
+          return;
+        }
       }
-    }
 
-    const pts = getInterpolatedPointsAtTime(action, currentTime);
-    if (!pts || pts.length === 0) return;
+      const rawPts = getInterpolatedPointsAtTime(action, currentTime);
+      if (!rawPts || rawPts.length === 0) return;
+      const pts = rawPts.map((p) => ({
+        x: Number.isFinite(p?.x) ? p.x : 640,
+        y: Number.isFinite(p?.y) ? p.y : 360,
+      }));
 
-    ctx.save();
-    const alpha = Math.max(0.1, Math.min(1, (action.opacity ?? 100) / 100));
-    const scaleFactor = Math.max(0.4, (action.scale ?? 100) / 100);
-    const strokeW = Math.max(1.5, (action.lineWidth || 4) * scaleFactor);
+      ctx.save();
+      const alpha = Math.max(0.1, Math.min(1, (action.opacity ?? 100) / 100));
+      const scaleFactor = Math.max(0.4, (action.scale ?? 100) / 100);
+      const strokeW = Math.max(1.5, (action.lineWidth || 4) * scaleFactor);
 
-    const box = getDrawingBoundingBox(action, currentTime);
-    if (action.rotation && action.rotation !== 0) {
-      ctx.translate(box.cx, box.cy);
-      ctx.rotate((action.rotation * Math.PI) / 180);
-      ctx.translate(-box.cx, -box.cy);
-    }
+      const box = getDrawingBoundingBox(action, currentTime);
+      if (action.rotation && action.rotation !== 0 && Number.isFinite(box.cx) && Number.isFinite(box.cy)) {
+        ctx.translate(box.cx, box.cy);
+        ctx.rotate((action.rotation * Math.PI) / 180);
+        ctx.translate(-box.cx, -box.cy);
+      }
 
     ctx.globalAlpha = alpha;
     ctx.strokeStyle = action.color || '#cc2016';
@@ -400,17 +405,22 @@ export function renderDrawingActions(
 
       case 'foco': {
         ctx.setLineDash([]);
-        const rx = Math.max(28, Math.hypot(end.x - start.x, end.y - start.y) || 38 * scaleFactor);
+        const hyp = Math.hypot(end.x - start.x, end.y - start.y);
+        const rx = Math.max(28, Number.isFinite(hyp) && hyp > 0 ? hyp : 38 * scaleFactor);
         const ry = rx * 0.42;
         const beamHeight = Math.max(180, rx * 4.2);
 
         // Haz de luz cilíndrico / cónico vertical desde arriba hacia el jugador
-        const grad = ctx.createLinearGradient(start.x, start.y - beamHeight, start.x, start.y);
-        grad.addColorStop(0, hexToRgba(action.color, 0.02));
-        grad.addColorStop(0.5, hexToRgba(action.color, 0.22));
-        grad.addColorStop(1, hexToRgba(action.color, 0.55));
+        try {
+          const grad = ctx.createLinearGradient(start.x, start.y - beamHeight, start.x, start.y);
+          grad.addColorStop(0, hexToRgba(action.color, 0.02));
+          grad.addColorStop(0.5, hexToRgba(action.color, 0.22));
+          grad.addColorStop(1, hexToRgba(action.color, 0.55));
+          ctx.fillStyle = grad;
+        } catch {
+          ctx.fillStyle = hexToRgba(action.color, 0.25);
+        }
 
-        ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.moveTo(start.x - rx * 0.65, start.y - beamHeight);
         ctx.lineTo(start.x + rx * 0.65, start.y - beamHeight);
@@ -785,5 +795,11 @@ export function renderDrawingActions(
     }
 
     ctx.restore();
+    } catch (err) {
+      console.warn('Error renderizando acción táctica:', action?.tool, err);
+      try {
+        ctx.restore();
+      } catch {}
+    }
   });
 }

@@ -885,33 +885,37 @@ export default function App() {
     let lastStateSync = performance.now();
 
     const tick = () => {
-      const videoEl = videoRef.current;
-      const canvas = overlayCanvasRef.current;
-      if (videoEl && !videoEl.paused && canvas) {
-        const t = videoEl.currentTime;
-        const { hasNewKeyframes, updatedActions } = stepLivePlayerTracking(
-          videoEl,
-          drawingsRef.current,
-          t
-        );
-        if (hasNewKeyframes) {
-          drawingsRef.current = updatedActions;
-          if (performance.now() - lastStateSync > 450) {
-            lastStateSync = performance.now();
-            setDrawings(updatedActions);
+      try {
+        const videoEl = videoRef.current;
+        const canvas = overlayCanvasRef.current;
+        if (videoEl && !videoEl.paused && canvas) {
+          const t = videoEl.currentTime;
+          const { hasNewKeyframes, updatedActions } = stepLivePlayerTracking(
+            videoEl,
+            drawingsRef.current,
+            t
+          );
+          if (hasNewKeyframes) {
+            drawingsRef.current = updatedActions;
+            if (performance.now() - lastStateSync > 450) {
+              lastStateSync = performance.now();
+              setDrawings(updatedActions);
+            }
+          }
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            renderDrawingActions(ctx, drawingsRef.current, {
+              currentTime: t,
+              selectedId: selectedDrawingId,
+              ignoreTimeVisibility: false,
+              videoElement: videoEl,
+              senecaLogoImg: senecaLogoRef.current,
+            });
           }
         }
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          renderDrawingActions(ctx, drawingsRef.current, {
-            currentTime: t,
-            selectedId: selectedDrawingId,
-            ignoreTimeVisibility: false,
-            videoElement: videoEl,
-            senecaLogoImg: senecaLogoRef.current,
-          });
-        }
+      } catch (tickErr) {
+        console.warn('Error en el bucle de seguimiento táctico:', tickErr);
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -919,7 +923,6 @@ export default function App() {
     rafId = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(rafId);
-      setDrawings([...drawingsRef.current]);
     };
   }, [isPlaying, activeFreezeOverlay, selectedDrawingId]);
 
@@ -1471,198 +1474,212 @@ export default function App() {
   const handleInsertPaintedFrameInVideo = (
     mode: 'imagen_parada' | 'video_corriendo' = 'imagen_parada'
   ) => {
-    if (videoRef.current && !videoRef.current.paused) {
-      videoRef.current.pause();
-      setIsPlaying(false);
-    }
-
-    const safeTime = Number.isFinite(currentTime) ? Number(currentTime.toFixed(1)) : 0;
-    const rawFreeze = Number(insertFreezeSeconds);
-    const isManualHold = rawFreeze === 0;
-    const freezeSecs = isManualHold ? 5 : Math.max(1, rawFreeze || 5);
-    const runningSecs = visibleDuration > 0 ? visibleDuration : 8;
-    const clipDurationSecs = mode === 'imagen_parada' ? freezeSecs : runningSecs;
-    const labelDuration = isManualHold ? 'Pausa fija' : `${freezeSecs} s`;
-
-    // Si había un polígono/conector en curso al pulsar Insertar, lo cerramos e incluimos con seguimiento de jugadores
-    let updatedDrawings = [...drawings];
-    if (multiPointDraft && multiPointDraft.points.length >= 2) {
-      const cleanedPts =
-        multiPointDraft.points.length > 2
-          ? multiPointDraft.points.slice(0, -1)
-          : multiPointDraft.points;
-      const closedDraft: DrawingAction = {
-        ...multiPointDraft,
-        points: cleanedPts,
-        closed: true,
-        timestamp: safeTime,
-        trackPlayers: trackPlayersMode,
-        keyframes: [
-          {
-            time: safeTime,
-            points: cleanedPts.map((p) => ({
-              x: Math.round(p.x * 10) / 10,
-              y: Math.round(p.y * 10) / 10,
-            })),
-            manual: true,
-          },
-        ],
-      };
-      captureDrawingTemplates(videoRef.current, closedDraft, safeTime);
-      updatedDrawings.push(closedDraft);
-      setMultiPointDraft(null);
-    }
-    if (currentDraftAction && currentDraftAction.points.length >= 2) {
-      const closedCurrent: DrawingAction = {
-        ...currentDraftAction,
-        timestamp: safeTime,
-        trackPlayers: trackPlayersMode,
-        keyframes: [
-          {
-            time: safeTime,
-            points: currentDraftAction.points.map((p) => ({
-              x: Math.round(p.x * 10) / 10,
-              y: Math.round(p.y * 10) / 10,
-            })),
-            manual: true,
-          },
-        ],
-      };
-      captureDrawingTemplates(videoRef.current, closedCurrent, safeTime);
-      updatedDrawings.push(closedCurrent);
-      setCurrentDraftAction(null);
-    }
-
-    let earliestStart = safeTime;
-
-    // Anclar los dibujos visibles y activar su plantilla de seguimiento de jugadores
-    updatedDrawings = updatedDrawings.map((d) => {
-      const isCurrentlyShown =
-        drawingMode ||
-        d.visibleDuration === 0 ||
-        Math.abs(safeTime - d.timestamp) <= Math.max(d.visibleDuration, clipDurationSecs);
-      if (isCurrentlyShown) {
-        const hasMultipleKeyframes = d.keyframes && d.keyframes.length > 1;
-        const anchorTime = hasMultipleKeyframes ? d.timestamp : safeTime;
-        if (anchorTime < earliestStart) earliestStart = anchorTime;
-
-        const nextD: DrawingAction = {
-          ...d,
-          timestamp: anchorTime,
-          visibleDuration: Math.max(d.visibleDuration || clipDurationSecs, clipDurationSecs),
-          trackPlayers: d.trackPlayers ?? trackPlayersMode,
-          keyframes:
-            hasMultipleKeyframes && d.keyframes
-              ? d.keyframes
-              : [
-                  {
-                    time: anchorTime,
-                    points: d.points.map((p) => ({
-                      x: Math.round(p.x * 10) / 10,
-                      y: Math.round(p.y * 10) / 10,
-                    })),
-                    manual: true,
-                  },
-                ],
-        };
-        if (!hasMultipleKeyframes) {
-          captureDrawingTemplates(videoRef.current, nextD, safeTime);
-        }
-        return nextD;
+    try {
+      if (videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+        setIsPlaying(false);
       }
-      return d;
-    });
 
-    drawingsRef.current = updatedDrawings;
-    setDrawings(updatedDrawings);
-    setSelectedDrawingId(null);
+      const safeTime = Number.isFinite(currentTime) ? Number(currentTime.toFixed(1)) : 0;
+      const rawFreeze = Number(insertFreezeSeconds);
+      const isManualHold = rawFreeze === 0;
+      const freezeSecs = isManualHold ? 5 : Math.max(1, rawFreeze || 5);
+      const runningSecs = visibleDuration > 0 ? visibleDuration : 8;
+      const clipDurationSecs = mode === 'imagen_parada' ? freezeSecs : runningSecs;
+      const labelDuration = isManualHold ? 'Pausa fija' : `${freezeSecs} s`;
 
-    const dataUrl = buildCompositeCanvasDataUrl('jpeg', updatedDrawings);
-    if (!dataUrl) {
-      notify('No se pudo insertar el pintado en el vídeo');
-      return;
-    }
+      // Si había un polígono/conector en curso al pulsar Insertar, lo cerramos e incluimos con seguimiento de jugadores
+      let updatedDrawings = [...drawings];
+      if (multiPointDraft && Array.isArray(multiPointDraft.points) && multiPointDraft.points.length >= 2) {
+        const validPoints = multiPointDraft.points
+          .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+          .map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+        if (validPoints.length >= 2) {
+          const cleanedPts =
+            validPoints.length > 2
+              ? validPoints.slice(0, -1)
+              : validPoints;
+          const closedDraft: DrawingAction = {
+            ...multiPointDraft,
+            points: cleanedPts,
+            closed: true,
+            timestamp: safeTime,
+            trackPlayers: trackPlayersMode,
+            keyframes: [
+              {
+                time: safeTime,
+                points: cleanedPts,
+                manual: true,
+              },
+            ],
+          };
+          captureDrawingTemplates(videoRef.current, closedDraft, safeTime);
+          updatedDrawings.push(closedDraft);
+        }
+        setMultiPointDraft(null);
+      }
+      if (currentDraftAction && Array.isArray(currentDraftAction.points) && currentDraftAction.points.length >= 1) {
+        const validPoints = currentDraftAction.points
+          .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+          .map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+        if (validPoints.length >= 1) {
+          const closedCurrent: DrawingAction = {
+            ...currentDraftAction,
+            points: validPoints,
+            timestamp: safeTime,
+            trackPlayers: trackPlayersMode,
+            keyframes: [
+              {
+                time: safeTime,
+                points: validPoints,
+                manual: true,
+              },
+            ],
+          };
+          captureDrawingTemplates(videoRef.current, closedCurrent, safeTime);
+          updatedDrawings.push(closedCurrent);
+        }
+        setCurrentDraftAction(null);
+      }
 
-    const newCap: CaptureItem = {
-      id: `cap-${Date.now()}`,
-      name:
-        mode === 'imagen_parada'
-          ? `Imagen Parada (${labelDuration}) @ ${formatTimecode(safeTime)}`
-          : `Pintado en Movimiento (${runningSecs}s) @ ${formatTimecode(earliestStart)}`,
-      timestamp: earliestStart,
-      dataUrl,
-      freezeDuration: mode === 'imagen_parada' ? (isManualHold ? 0 : freezeSecs) : 0,
-      createdAt: new Date().toISOString(),
-    };
-    const nextCaps = [newCap, ...captures];
-    setCaptures(nextCaps);
+      let earliestStart = safeTime;
 
-    let detectedHalf: '1ª Parte' | '2ª Parte' = liveHalf;
-    if (markers.secondHalfStart !== undefined && safeTime >= markers.secondHalfStart) {
-      detectedHalf = '2ª Parte';
-    } else if (markers.firstHalfStart !== undefined && safeTime >= markers.firstHalfStart) {
-      detectedHalf = '1ª Parte';
-    }
+      // Anclar los dibujos visibles y activar su plantilla de seguimiento de jugadores
+      updatedDrawings = updatedDrawings.map((d) => {
+        const isCurrentlyShown =
+          drawingMode ||
+          d.visibleDuration === 0 ||
+          Math.abs(safeTime - d.timestamp) <= Math.max(d.visibleDuration, clipDurationSecs);
+        if (isCurrentlyShown) {
+          const rawPoints = Array.isArray(d.points) ? d.points : [];
+          const validPoints = rawPoints
+            .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+            .map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+          if (validPoints.length === 0) return d;
 
-    const isStill = mode === 'imagen_parada';
+          const hasMultipleKeyframes = d.keyframes && d.keyframes.length > 1;
+          const anchorTime = hasMultipleKeyframes ? d.timestamp : safeTime;
+          if (anchorTime < earliestStart) earliestStart = anchorTime;
 
-    const newEvent: ClipEvent = {
-      id: `ev-pint-${Date.now()}`,
-      name: isStill
-        ? `Imagen Parada (${labelDuration})`
-        : `Pintado con Seguimiento (${runningSecs} s)`,
-      category: 'Pizarra Táctica',
-      color: strokeColor || '#cc2016',
-      startTime: isStill ? safeTime : earliestStart,
-      endTime: Number((earliestStart + clipDurationSecs).toFixed(1)),
-      videoId: activeVideo?.id || 'sin-video',
-      videoName: activeVideo?.name || 'Visor',
-      team: 'Séneca CF',
-      player: selectedPlayerTag || undefined,
-      half: detectedHalf,
-      zone: selectedPitchZone,
-      descriptors: activeDescriptors,
-      userClassified: Boolean(selectedPlayerTag || activeDescriptors.length > 0),
-      notes: isStill ? 'IMAGEN_PARADA' : 'VIDEO_CORRIENDO_TRACKING',
-      drawingDataUrl: dataUrl,
-      isFreezeInsert: isStill,
-      freezeTimestamp: safeTime,
-      freezeDuration: isManualHold ? 0 : freezeSecs,
-      createdAt: new Date().toISOString(),
-    };
-
-    const nextEvents = [...events, newEvent];
-    setEvents(nextEvents);
-    setSelectedEventId(newEvent.id);
-    setDrawingMode(false);
-    pushHistory({ events: nextEvents, captures: nextCaps, drawings: updatedDrawings });
-
-    if (isStill) {
-      // Mantiene la imagen totalmente parada en el visor sin que el vídeo siga corriendo
-      triggeredFreezeIdsRef.current.add(newEvent.id);
-      setActiveFreezeOverlay({
-        eventId: newEvent.id,
-        dataUrl,
-        remaining: freezeSecs,
-        total: freezeSecs,
-        resumeAfter: false,
-        manualHold: true,
+          const nextD: DrawingAction = {
+            ...d,
+            points: validPoints,
+            timestamp: anchorTime,
+            visibleDuration: Math.max(d.visibleDuration || clipDurationSecs, clipDurationSecs),
+            trackPlayers: d.trackPlayers ?? trackPlayersMode,
+            keyframes:
+              hasMultipleKeyframes && d.keyframes
+                ? d.keyframes
+                : [
+                    {
+                      time: anchorTime,
+                      points: validPoints,
+                      manual: true,
+                    },
+                  ],
+          };
+          if (!hasMultipleKeyframes) {
+            captureDrawingTemplates(videoRef.current, nextD, safeTime);
+          }
+          return nextD;
+        }
+        return d;
       });
-      notify(
-        `Imagen parada (${labelDuration}) insertada: el vídeo se detendrá en este fotograma sin seguir corriendo`
-      );
-    } else {
-      setActiveFreezeOverlay(null);
-      if (videoRef.current && activeVideo) {
-        if (Math.abs(videoRef.current.currentTime - earliestStart) > 0.2) {
-          videoRef.current.currentTime = earliestStart;
-        }
-        videoRef.current.play().catch(() => {});
-        setIsPlaying(true);
+
+      drawingsRef.current = updatedDrawings;
+      setDrawings(updatedDrawings);
+      setSelectedDrawingId(null);
+
+      const dataUrl = buildCompositeCanvasDataUrl('jpeg', updatedDrawings);
+      if (!dataUrl) {
+        notify('No se pudo insertar el pintado en el vídeo');
+        return;
       }
-      notify(
-        `Pintado insertado en movimiento (${runningSecs} s): el conector/foco sigue a los jugadores marcados`
-      );
+
+      const newCap: CaptureItem = {
+        id: `cap-${Date.now()}`,
+        name:
+          mode === 'imagen_parada'
+            ? `Imagen Parada (${labelDuration}) @ ${formatTimecode(safeTime)}`
+            : `Pintado en Movimiento (${runningSecs}s) @ ${formatTimecode(earliestStart)}`,
+        timestamp: earliestStart,
+        dataUrl,
+        freezeDuration: mode === 'imagen_parada' ? (isManualHold ? 0 : freezeSecs) : 0,
+        createdAt: new Date().toISOString(),
+      };
+      const nextCaps = [newCap, ...captures];
+      setCaptures(nextCaps);
+
+      let detectedHalf: '1ª Parte' | '2ª Parte' = liveHalf;
+      if (markers.secondHalfStart !== undefined && safeTime >= markers.secondHalfStart) {
+        detectedHalf = '2ª Parte';
+      } else if (markers.firstHalfStart !== undefined && safeTime >= markers.firstHalfStart) {
+        detectedHalf = '1ª Parte';
+      }
+
+      const isStill = mode === 'imagen_parada';
+
+      const newEvent: ClipEvent = {
+        id: `ev-pint-${Date.now()}`,
+        name: isStill
+          ? `Imagen Parada (${labelDuration})`
+          : `Pintado con Seguimiento (${runningSecs} s)`,
+        category: 'Pizarra Táctica',
+        color: strokeColor || '#cc2016',
+        startTime: isStill ? safeTime : earliestStart,
+        endTime: Number((earliestStart + clipDurationSecs).toFixed(1)),
+        videoId: activeVideo?.id || 'sin-video',
+        videoName: activeVideo?.name || 'Visor',
+        team: 'Séneca CF',
+        player: selectedPlayerTag || undefined,
+        half: detectedHalf,
+        zone: selectedPitchZone,
+        descriptors: activeDescriptors,
+        userClassified: Boolean(selectedPlayerTag || activeDescriptors.length > 0),
+        notes: isStill ? 'IMAGEN_PARADA' : 'VIDEO_CORRIENDO_TRACKING',
+        drawingDataUrl: dataUrl,
+        isFreezeInsert: isStill,
+        freezeTimestamp: safeTime,
+        freezeDuration: isManualHold ? 0 : freezeSecs,
+        createdAt: new Date().toISOString(),
+      };
+
+      const nextEvents = [...events, newEvent];
+      setEvents(nextEvents);
+      setSelectedEventId(newEvent.id);
+      setDrawingMode(false);
+      pushHistory({ events: nextEvents, captures: nextCaps, drawings: updatedDrawings });
+
+      if (isStill) {
+        // Mantiene la imagen totalmente parada en el visor sin que el vídeo siga corriendo
+        triggeredFreezeIdsRef.current.add(newEvent.id);
+        setActiveFreezeOverlay({
+          eventId: newEvent.id,
+          dataUrl,
+          remaining: freezeSecs,
+          total: freezeSecs,
+          resumeAfter: false,
+          manualHold: true,
+        });
+        notify(
+          `Imagen parada (${labelDuration}) insertada: el vídeo se detendrá en este fotograma sin seguir corriendo`
+        );
+      } else {
+        setActiveFreezeOverlay(null);
+        if (videoRef.current && activeVideo) {
+          if (Math.abs(videoRef.current.currentTime - earliestStart) > 0.2) {
+            videoRef.current.currentTime = earliestStart;
+          }
+          videoRef.current.play().catch(() => {});
+          setIsPlaying(true);
+        }
+        notify(
+          `Pintado insertado en movimiento (${runningSecs} s): el conector/foco sigue a los jugadores marcados`
+        );
+      }
+    } catch (insertErr) {
+      console.error('Error al insertar el fotograma táctico en el vídeo:', insertErr);
+      notify('Ocurrió un error al insertar el fotograma en el vídeo');
     }
   };
 

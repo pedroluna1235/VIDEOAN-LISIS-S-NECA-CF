@@ -3,6 +3,14 @@ import ReactDOM from 'react-dom/client';
 import App from './App';
 import './index.css';
 
+window.addEventListener('error', (event) => {
+  console.warn('Global error guarded:', event.error || event.message);
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.warn('Global unhandled rejection guarded:', event.reason);
+});
+
 interface ErrorBoundaryState {
   hasError: boolean;
   errorMessage: string;

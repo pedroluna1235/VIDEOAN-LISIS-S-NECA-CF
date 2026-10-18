@@ -351,8 +351,10 @@ function estimateLocalGrassColor(
  * Crea la plantilla visual de un jugador alrededor del punto marcado (pt en 1280x720)
  */
 function buildPointTemplate(data: Uint8ClampedArray, pt: { x: number; y: number }): PointTemplate {
-  const tx = Math.max(PATCH_HALF_W + 2, Math.min(TRACK_W - PATCH_HALF_W - 3, pt.x * SCALE));
-  const ty = Math.max(PATCH_HALF_H + 2, Math.min(TRACK_H - PATCH_HALF_H - 3, pt.y * SCALE));
+  const safePtX = Number.isFinite(pt?.x) ? pt.x : CANVAS_W / 2;
+  const safePtY = Number.isFinite(pt?.y) ? pt.y : CANVAS_H / 2;
+  const tx = Math.max(PATCH_HALF_W + 2, Math.min(TRACK_W - PATCH_HALF_W - 3, safePtX * SCALE));
+  const ty = Math.max(PATCH_HALF_H + 2, Math.min(TRACK_H - PATCH_HALF_H - 3, safePtY * SCALE));
 
   const grass = estimateLocalGrassColor(data, tx, ty);
 
@@ -379,9 +381,12 @@ function buildPointTemplate(data: Uint8ClampedArray, pt: { x: number; y: number 
       for (let py = -3; py <= 3; py++) {
         for (let px = -2; px <= 2; px++) {
           const idx = ((cy + py) * TRACK_W + (cx + px)) * 4;
-          const dr = Math.abs(data[idx] - grass.r);
-          const dg = Math.abs(data[idx + 1] - grass.g);
-          const db = Math.abs(data[idx + 2] - grass.b);
+          const r = data[idx] ?? 0;
+          const g = data[idx + 1] ?? 0;
+          const b = data[idx + 2] ?? 0;
+          const dr = Math.abs(r - grass.r);
+          const dg = Math.abs(g - grass.g);
+          const db = Math.abs(b - grass.b);
           score += dr + dg * 1.2 + db;
         }
       }
@@ -416,9 +421,9 @@ function buildPointTemplate(data: Uint8ClampedArray, pt: { x: number; y: number 
       const px = Math.max(0, Math.min(TRACK_W - 1, ibx + dx));
       const py = Math.max(0, Math.min(TRACK_H - 1, iby + dy));
       const idx = (py * TRACK_W + px) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
+      const r = data[idx] ?? 0;
+      const g = data[idx + 1] ?? 0;
+      const b = data[idx + 2] ?? 0;
 
       initR[k] = r;
       initG[k] = g;
@@ -449,10 +454,10 @@ function buildPointTemplate(data: Uint8ClampedArray, pt: { x: number; y: number 
   }
 
   return {
-    bx,
-    by,
-    offsetX,
-    offsetY,
+    bx: Number.isFinite(bx) ? bx : tx,
+    by: Number.isFinite(by) ? by : ty,
+    offsetX: Number.isFinite(offsetX) ? offsetX : 0,
+    offsetY: Number.isFinite(offsetY) ? offsetY : 0,
     vx: 0,
     vy: 0,
     initR,
@@ -488,12 +493,17 @@ function evaluatePatchCost(
     const rowOffset = py * TRACK_W;
     for (let dx = -PATCH_HALF_W; dx <= PATCH_HALF_W; dx++) {
       const px = cx + dx;
+      if (px < 0 || px >= TRACK_W || py < 0 || py >= TRACK_H) {
+        cost += 10;
+        k++;
+        continue;
+      }
       const idx = (rowOffset + px) * 4;
-      const r = data[idx];
-      const g = data[idx + 1];
-      const b = data[idx + 2];
+      const r = data[idx] ?? 0;
+      const g = data[idx + 1] ?? 0;
+      const b = data[idx + 2] ?? 0;
 
-      const w = tpl.weights[k];
+      const w = tpl.weights[k] || 0.01;
       // Combinación 65% plantilla inicial + 35% plantilla adaptativa para soportar cambios de postura en carrera
       const refR = tpl.initR[k] * 0.65 + tpl.adaptR[k] * 0.35;
       const refG = tpl.initG[k] * 0.65 + tpl.adaptG[k] * 0.35;
@@ -517,7 +527,7 @@ function evaluatePatchCost(
   const distSq = (cx - predX) * (cx - predX) + (cy - predY) * (cy - predY);
   cost += distSq * 0.42;
 
-  return cost;
+  return Number.isFinite(cost) ? cost : 9999;
 }
 
 /**
@@ -528,106 +538,140 @@ function trackSinglePoint(
   tpl: PointTemplate,
   dt: number
 ): { x: number; y: number } {
-  const clampedDt = Math.max(0.015, Math.min(0.12, dt));
-  const predX = Math.max(
-    PATCH_HALF_W + 2,
-    Math.min(TRACK_W - PATCH_HALF_W - 3, tpl.bx + tpl.vx * clampedDt * 0.65)
-  );
-  const predY = Math.max(
-    PATCH_HALF_H + 2,
-    Math.min(TRACK_H - PATCH_HALF_H - 3, tpl.by + tpl.vy * clampedDt * 0.65)
-  );
+  if (!tpl) return { x: CANVAS_W / 2, y: CANVAS_H / 2 };
 
-  const centerX = Math.round(predX);
-  const centerY = Math.round(predY);
+  try {
+    const safeBx = Number.isFinite(tpl.bx) ? tpl.bx : TRACK_W / 2;
+    const safeBy = Number.isFinite(tpl.by) ? tpl.by : TRACK_H / 2;
+    const safeVx = Number.isFinite(tpl.vx) ? tpl.vx : 0;
+    const safeVy = Number.isFinite(tpl.vy) ? tpl.vy : 0;
 
-  const searchRx = 8; // +-32 px por frame en 1280x720
-  const searchRy = 6; // +-24 px por frame en 1280x720
+    const clampedDt = Math.max(0.015, Math.min(0.12, Number.isFinite(dt) ? dt : 0.033));
+    const predX = Math.max(
+      PATCH_HALF_W + 2,
+      Math.min(TRACK_W - PATCH_HALF_W - 3, safeBx + safeVx * clampedDt * 0.65)
+    );
+    const predY = Math.max(
+      PATCH_HALF_H + 2,
+      Math.min(TRACK_H - PATCH_HALF_H - 3, safeBy + safeVy * clampedDt * 0.65)
+    );
 
-  const minX = Math.max(PATCH_HALF_W + 1, centerX - searchRx);
-  const maxX = Math.min(TRACK_W - PATCH_HALF_W - 2, centerX + searchRx);
-  const minY = Math.max(PATCH_HALF_H + 1, centerY - searchRy);
-  const maxY = Math.min(TRACK_H - PATCH_HALF_H - 2, centerY + searchRy);
+    const centerX = Math.round(Number.isFinite(predX) ? predX : TRACK_W / 2);
+    const centerY = Math.round(Number.isFinite(predY) ? predY : TRACK_H / 2);
 
-  let bestX = centerX;
-  let bestY = centerY;
-  let bestCost = Infinity;
+    const searchRx = 8; // +-32 px por frame en 1280x720
+    const searchRy = 6; // +-24 px por frame en 1280x720
 
-  const widthSpan = maxX - minX + 1;
-  const heightSpan = maxY - minY + 1;
-  const costGrid = new Float32Array(widthSpan * heightSpan);
+    const minX = Math.max(PATCH_HALF_W + 1, centerX - searchRx);
+    const maxX = Math.min(TRACK_W - PATCH_HALF_W - 2, Math.max(minX + 1, centerX + searchRx));
+    const minY = Math.max(PATCH_HALF_H + 1, centerY - searchRy);
+    const maxY = Math.min(TRACK_H - PATCH_HALF_H - 2, Math.max(minY + 1, centerY + searchRy));
 
-  for (let cy = minY; cy <= maxY; cy++) {
-    for (let cx = minX; cx <= maxX; cx++) {
-      const c = evaluatePatchCost(data, tpl, cx, cy, predX, predY);
-      costGrid[(cy - minY) * widthSpan + (cx - minX)] = c;
-      if (c < bestCost) {
-        bestCost = c;
-        bestX = cx;
-        bestY = cy;
+    let bestX = centerX;
+    let bestY = centerY;
+    let bestCost = Infinity;
+
+    const widthSpan = Math.max(1, maxX - minX + 1);
+    const heightSpan = Math.max(1, maxY - minY + 1);
+    const costGrid = new Float32Array(widthSpan * heightSpan);
+
+    for (let cy = minY; cy <= maxY; cy++) {
+      for (let cx = minX; cx <= maxX; cx++) {
+        const c = evaluatePatchCost(data, tpl, cx, cy, predX, predY);
+        costGrid[(cy - minY) * widthSpan + (cx - minX)] = c;
+        if (c < bestCost) {
+          bestCost = c;
+          bestX = cx;
+          bestY = cy;
+        }
       }
     }
-  }
 
-  // Refinamiento sub-píxel parabólico para movimiento ultra fluido sin escalones
-  let subX = bestX;
-  let subY = bestY;
-  if (bestX > minX && bestX < maxX) {
-    const cLeft = costGrid[(bestY - minY) * widthSpan + (bestX - 1 - minX)];
-    const cRight = costGrid[(bestY - minY) * widthSpan + (bestX + 1 - minX)];
-    const denom = 2 * (cLeft - 2 * bestCost + cRight);
-    if (Math.abs(denom) > 1e-4) {
-      const delta = (cLeft - cRight) / denom;
-      if (Math.abs(delta) <= 0.6) subX += delta;
-    }
-  }
-  if (bestY > minY && bestY < maxY) {
-    const cUp = costGrid[(bestY - 1 - minY) * widthSpan + (bestX - minX)];
-    const cDown = costGrid[(bestY + 1 - minY) * widthSpan + (bestX - minX)];
-    const denom = 2 * (cUp - 2 * bestCost + cDown);
-    if (Math.abs(denom) > 1e-4) {
-      const delta = (cUp - cDown) / denom;
-      if (Math.abs(delta) <= 0.6) subY += delta;
-    }
-  }
-
-  // Suavizado exponencial (EMA) de posición y velocidad
-  const alphaPos = 0.58;
-  const newBx = tpl.bx * (1 - alphaPos) + subX * alphaPos;
-  const newBy = tpl.by * (1 - alphaPos) + subY * alphaPos;
-
-  const instVx = (newBx - tpl.bx) / clampedDt;
-  const instVy = (newBy - tpl.by) / clampedDt;
-  tpl.vx = tpl.vx * 0.55 + instVx * 0.45;
-  tpl.vy = tpl.vy * 0.55 + instVy * 0.45;
-  tpl.bx = newBx;
-  tpl.by = newBy;
-
-  // Actualizar suavemente la plantilla adaptativa si la coincidencia es buena
-  if (bestCost < 95) {
-    const ibx = Math.round(newBx);
-    const iby = Math.round(newBy);
-    let k = 0;
-    const rate = 0.12;
-    for (let dy = -PATCH_HALF_H; dy <= PATCH_HALF_H; dy++) {
-      for (let dx = -PATCH_HALF_W; dx <= PATCH_HALF_W; dx++) {
-        const px = Math.max(0, Math.min(TRACK_W - 1, ibx + dx));
-        const py = Math.max(0, Math.min(TRACK_H - 1, iby + dy));
-        const idx = (py * TRACK_W + px) * 4;
-        tpl.adaptR[k] = tpl.adaptR[k] * (1 - rate) + data[idx] * rate;
-        tpl.adaptG[k] = tpl.adaptG[k] * (1 - rate) + data[idx + 1] * rate;
-        tpl.adaptB[k] = tpl.adaptB[k] * (1 - rate) + data[idx + 2] * rate;
-        k++;
+    // Refinamiento sub-píxel parabólico para movimiento ultra fluido sin escalones
+    let subX = bestX;
+    let subY = bestY;
+    if (bestX > minX && bestX < maxX && Number.isFinite(bestCost) && bestCost < 9999) {
+      const cLeft = costGrid[(bestY - minY) * widthSpan + (bestX - 1 - minX)];
+      const cRight = costGrid[(bestY - minY) * widthSpan + (bestX + 1 - minX)];
+      if (Number.isFinite(cLeft) && Number.isFinite(cRight)) {
+        const denom = 2 * (cLeft - 2 * bestCost + cRight);
+        if (Math.abs(denom) > 1e-4) {
+          const delta = (cLeft - cRight) / denom;
+          if (Number.isFinite(delta) && Math.abs(delta) <= 0.6) subX += delta;
+        }
       }
     }
-  }
+    if (bestY > minY && bestY < maxY && Number.isFinite(bestCost) && bestCost < 9999) {
+      const cUp = costGrid[(bestY - 1 - minY) * widthSpan + (bestX - minX)];
+      const cDown = costGrid[(bestY + 1 - minY) * widthSpan + (bestX - minX)];
+      if (Number.isFinite(cUp) && Number.isFinite(cDown)) {
+        const denom = 2 * (cUp - 2 * bestCost + cDown);
+        if (Math.abs(denom) > 1e-4) {
+          const delta = (cUp - cDown) / denom;
+          if (Number.isFinite(delta) && Math.abs(delta) <= 0.6) subY += delta;
+        }
+      }
+    }
 
-  const outX = Math.max(10, Math.min(CANVAS_W - 10, (newBx - tpl.offsetX) / SCALE));
-  const outY = Math.max(10, Math.min(CANVAS_H - 10, (newBy - tpl.offsetY) / SCALE));
-  return {
-    x: Math.round(outX * 10) / 10,
-    y: Math.round(outY * 10) / 10,
-  };
+    // Suavizado exponencial (EMA) de posición y velocidad
+    const alphaPos = 0.58;
+    const calcBx = safeBx * (1 - alphaPos) + subX * alphaPos;
+    const calcBy = safeBy * (1 - alphaPos) + subY * alphaPos;
+    const newBx = Number.isFinite(calcBx)
+      ? Math.max(PATCH_HALF_W + 1, Math.min(TRACK_W - PATCH_HALF_W - 1, calcBx))
+      : safeBx;
+    const newBy = Number.isFinite(calcBy)
+      ? Math.max(PATCH_HALF_H + 1, Math.min(TRACK_H - PATCH_HALF_H - 1, calcBy))
+      : safeBy;
+
+    const instVx = (newBx - safeBx) / clampedDt;
+    const instVy = (newBy - safeBy) / clampedDt;
+    tpl.vx = Number.isFinite(instVx) ? safeVx * 0.55 + instVx * 0.45 : 0;
+    tpl.vy = Number.isFinite(instVy) ? safeVy * 0.55 + instVy * 0.45 : 0;
+    tpl.bx = newBx;
+    tpl.by = newBy;
+
+    // Actualizar suavemente la plantilla adaptativa si la coincidencia es buena
+    if (Number.isFinite(bestCost) && bestCost < 95) {
+      const ibx = Math.round(newBx);
+      const iby = Math.round(newBy);
+      let k = 0;
+      const rate = 0.12;
+      for (let dy = -PATCH_HALF_H; dy <= PATCH_HALF_H; dy++) {
+        for (let dx = -PATCH_HALF_W; dx <= PATCH_HALF_W; dx++) {
+          const px = Math.max(0, Math.min(TRACK_W - 1, ibx + dx));
+          const py = Math.max(0, Math.min(TRACK_H - 1, iby + dy));
+          const idx = (py * TRACK_W + px) * 4;
+          const r = data[idx] ?? 0;
+          const g = data[idx + 1] ?? 0;
+          const b = data[idx + 2] ?? 0;
+          tpl.adaptR[k] = tpl.adaptR[k] * (1 - rate) + r * rate;
+          tpl.adaptG[k] = tpl.adaptG[k] * (1 - rate) + g * rate;
+          tpl.adaptB[k] = tpl.adaptB[k] * (1 - rate) + b * rate;
+          k++;
+        }
+      }
+    }
+
+    const safeOffX = Number.isFinite(tpl.offsetX) ? tpl.offsetX : 0;
+    const safeOffY = Number.isFinite(tpl.offsetY) ? tpl.offsetY : 0;
+    const rawOutX = (newBx - safeOffX) / SCALE;
+    const rawOutY = (newBy - safeOffY) / SCALE;
+    const outX = Number.isFinite(rawOutX) ? Math.max(10, Math.min(CANVAS_W - 10, rawOutX)) : CANVAS_W / 2;
+    const outY = Number.isFinite(rawOutY) ? Math.max(10, Math.min(CANVAS_H - 10, rawOutY)) : CANVAS_H / 2;
+    return {
+      x: Math.round(outX * 10) / 10,
+      y: Math.round(outY * 10) / 10,
+    };
+  } catch (err) {
+    console.warn('Error en trackSinglePoint:', err);
+    const fallbackX = Number.isFinite(tpl.bx) ? tpl.bx / SCALE : CANVAS_W / 2;
+    const fallbackY = Number.isFinite(tpl.by) ? tpl.by / SCALE : CANVAS_H / 2;
+    return {
+      x: Math.round(fallbackX * 10) / 10,
+      y: Math.round(fallbackY * 10) / 10,
+    };
+  }
 }
 
 /**
@@ -649,15 +693,23 @@ export function captureDrawingTemplates(
     drawVideoFrameCropped(ctx, videoEl, TRACK_W, TRACK_H);
     const imgData = ctx.getImageData(0, 0, TRACK_W, TRACK_H).data;
 
-    const pts = overridePoints || action.points;
+    const rawPts = overridePoints || action.points;
+    const pts = rawPts
+      .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+      .map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 }));
+    if (pts.length === 0) return;
+
     const rigid = isRigidRadiusTool(action.tool);
     const anchorPts = rigid ? [pts[0]] : pts;
     const templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
-    const rigidOffsets = rigid
-      ? pts.slice(1).map((p) => ({ dx: p.x - pts[0].x, dy: p.y - pts[0].y }))
+    const rigidOffsets = rigid && pts.length > 1
+      ? pts.slice(1).map((p) => ({
+          dx: Number.isFinite(p.x - pts[0].x) ? p.x - pts[0].x : 0,
+          dy: Number.isFinite(p.y - pts[0].y) ? p.y - pts[0].y : 0,
+        }))
       : [];
 
-    const t = atTime !== undefined ? atTime : action.timestamp;
+    const t = atTime !== undefined && Number.isFinite(atTime) ? atTime : action.timestamp;
     trackerMap.set(action.id, {
       actionId: action.id,
       lastTime: t,
@@ -668,7 +720,7 @@ export function captureDrawingTemplates(
       liveTime: t,
     });
   } catch {
-    // Ignorar si el vídeo externo tiene restricción CORS
+    // Ignorar si el vídeo externo tiene restricción CORS o error transitorio
   }
 }
 
@@ -691,35 +743,44 @@ export function getInterpolatedPointsAtTime(
   currentTime: number
 ): { x: number; y: number }[] {
   if (!action.points || action.points.length === 0) return [];
-  if (action.trackPlayers === false) return action.points;
+  const safeBasePts = action.points
+    .filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y))
+    .map((p) => ({ x: p.x, y: p.y }));
+  if (safeBasePts.length === 0) return [];
+  if (action.trackPlayers === false) return safeBasePts;
 
   // Si el motor en vivo acaba de calcular la posición exacta para este instante, usarla directamente (60fps)
   const mem = trackerMap.get(action.id);
   if (
     mem &&
-    mem.livePoints.length === action.points.length &&
+    mem.livePoints &&
+    mem.livePoints.length === safeBasePts.length &&
     Math.abs(currentTime - mem.liveTime) <= 0.045
   ) {
-    return mem.livePoints;
+    const allFinite = mem.livePoints.every((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+    if (allFinite) return mem.livePoints;
   }
 
   const kfs = action.keyframes;
   if (!kfs || kfs.length === 0) {
-    return action.points;
+    return safeBasePts;
   }
 
-  if (currentTime <= kfs[0].time) {
-    return kfs[0].points.length === action.points.length ? kfs[0].points : action.points;
+  const validKfs = kfs.filter((k) => k && Array.isArray(k.points) && k.points.length === safeBasePts.length);
+  if (validKfs.length === 0) return safeBasePts;
+
+  if (currentTime <= validKfs[0].time) {
+    return validKfs[0].points;
   }
-  const lastKf = kfs[kfs.length - 1];
+  const lastKf = validKfs[validKfs.length - 1];
   if (currentTime >= lastKf.time) {
-    return lastKf.points.length === action.points.length ? lastKf.points : action.points;
+    return lastKf.points;
   }
 
   // Buscar el par de fotogramas clave [prev, next] que contienen currentTime
-  for (let i = 0; i < kfs.length - 1; i++) {
-    const a = kfs[i];
-    const b = kfs[i + 1];
+  for (let i = 0; i < validKfs.length - 1; i++) {
+    const a = validKfs[i];
+    const b = validKfs[i + 1];
     if (currentTime >= a.time && currentTime <= b.time) {
       const span = b.time - a.time;
       if (span <= 1e-4 || a.points.length !== b.points.length) {
@@ -728,15 +789,17 @@ export function getInterpolatedPointsAtTime(
       const ratio = Math.max(0, Math.min(1, (currentTime - a.time) / span));
       return a.points.map((pa, idx) => {
         const pb = b.points[idx] || pa;
+        const x = pa.x + (pb.x - pa.x) * ratio;
+        const y = pa.y + (pb.y - pa.y) * ratio;
         return {
-          x: pa.x + (pb.x - pa.x) * ratio,
-          y: pa.y + (pb.y - pa.y) * ratio,
+          x: Number.isFinite(x) ? Math.round(x * 10) / 10 : pa.x,
+          y: Number.isFinite(y) ? Math.round(y * 10) / 10 : pa.y,
         };
       });
     }
   }
 
-  return action.points;
+  return safeBasePts;
 }
 
 /**
@@ -848,121 +911,149 @@ export function stepLivePlayerTracking(
   const nextActions = [...actions];
 
   for (const idx of activeIndices) {
-    const action = nextActions[idx];
-    let mem = trackerMap.get(action.id);
+    try {
+      const action = nextActions[idx];
+      let mem = trackerMap.get(action.id);
 
-    // Si estamos justo en el inicio del dibujo (o se acaba de rebobinar al inicio), inicializar plantilla
-    if (!mem || Math.abs(currentTime - action.timestamp) <= 0.08) {
-      const startPts =
-        action.keyframes && action.keyframes.length > 0 && Math.abs(action.keyframes[0].time - action.timestamp) <= 0.15
-          ? action.keyframes[0].points
-          : action.points;
-      const rigid = isRigidRadiusTool(action.tool);
-      const anchorPts = rigid ? [startPts[0]] : startPts;
-      const templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
-      const rigidOffsets = rigid
-        ? startPts.slice(1).map((p) => ({ dx: p.x - startPts[0].x, dy: p.y - startPts[0].y }))
-        : [];
+      // Si estamos justo en el inicio del dibujo (o se acaba de rebobinar al inicio), inicializar plantilla
+      if (!mem || Math.abs(currentTime - action.timestamp) <= 0.08) {
+        const rawStartPts =
+          action.keyframes && action.keyframes.length > 0 && Math.abs(action.keyframes[0].time - action.timestamp) <= 0.15
+            ? action.keyframes[0].points
+            : action.points;
+        const startPts = (rawStartPts || []).filter((p) => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+        if (startPts.length === 0) continue;
 
-      mem = {
-        actionId: action.id,
-        lastTime: currentTime,
-        templates,
-        rigidFromFirstPoint: rigid,
-        rigidOffsets,
-        livePoints: startPts.map((p) => ({ ...p })),
-        liveTime: currentTime,
-      };
-      trackerMap.set(action.id, mem);
+        const rigid = isRigidRadiusTool(action.tool);
+        const anchorPts = rigid ? [startPts[0]] : startPts;
+        const templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
+        const rigidOffsets = rigid && startPts.length > 1
+          ? startPts.slice(1).map((p) => ({
+              dx: Number.isFinite(p.x - startPts[0].x) ? p.x - startPts[0].x : 0,
+              dy: Number.isFinite(p.y - startPts[0].y) ? p.y - startPts[0].y : 0,
+            }))
+          : [];
 
-      if (!action.keyframes || action.keyframes.length === 0) {
+        mem = {
+          actionId: action.id,
+          lastTime: currentTime,
+          templates,
+          rigidFromFirstPoint: rigid,
+          rigidOffsets,
+          livePoints: startPts.map((p) => ({ ...p })),
+          liveTime: currentTime,
+        };
+        trackerMap.set(action.id, mem);
+
+        if (!action.keyframes || action.keyframes.length === 0) {
+          nextActions[idx] = {
+            ...action,
+            trackPlayers: true,
+            keyframes: [
+              {
+                time: Math.round(action.timestamp * 100) / 100,
+                points: startPts.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 })),
+                manual: true,
+              },
+            ],
+          };
+          hasNewKeyframes = true;
+        }
+        continue;
+      }
+
+      const dt = currentTime - mem.lastTime;
+      // Si el vídeo saltó hacia atrás o dio un salto largo, re-sincronizar con los keyframes existentes
+      if (dt < 0 || dt > 0.45) {
+        const interpPts = getInterpolatedPointsAtTime(action, currentTime);
+        if (interpPts.length === 0) continue;
+        const rigid = isRigidRadiusTool(action.tool);
+        const anchorPts = rigid ? [interpPts[0]] : interpPts;
+        mem.templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
+        mem.lastTime = currentTime;
+        mem.livePoints = interpPts;
+        mem.liveTime = currentTime;
+        continue;
+      }
+
+      // Si hay un keyframe manual posterior a currentTime, respetar la interpolación manual hasta pasar ese keyframe
+      const hasManualAhead = action.keyframes?.some(
+        (k) => k.manual && k.time > currentTime + 0.02
+      );
+      if (hasManualAhead) {
+        const interpPts = getInterpolatedPointsAtTime(action, currentTime);
+        mem.livePoints = interpPts;
+        mem.liveTime = currentTime;
+        mem.lastTime = currentTime;
+        // Si estamos muy cerca de un keyframe manual, actualizar plantilla en ese punto
+        const nearManual = action.keyframes?.find(
+          (k) => k.manual && Math.abs(k.time - currentTime) <= 0.08
+        );
+        if (nearManual && nearManual.points && nearManual.points.length > 0) {
+          const rigid = isRigidRadiusTool(action.tool);
+          const anchorPts = rigid ? [nearManual.points[0]] : nearManual.points;
+          mem.templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
+        }
+        continue;
+      }
+
+      if (dt < 0.015) continue;
+
+      // Rastrear cada punto de jugador en el nuevo fotograma
+      let newPts: { x: number; y: number }[] = [];
+      if (mem.rigidFromFirstPoint) {
+        if (!mem.templates || mem.templates.length === 0) continue;
+        const trackedCenter = trackSinglePoint(imgData, mem.templates[0], dt);
+        newPts = [
+          trackedCenter,
+          ...mem.rigidOffsets.map((off) => ({
+            x: Math.round((trackedCenter.x + (off.dx || 0)) * 10) / 10,
+            y: Math.round((trackedCenter.y + (off.dy || 0)) * 10) / 10,
+          })),
+        ];
+      } else {
+        if (!mem.templates || mem.templates.length === 0) continue;
+        newPts = mem.templates.map((tpl, tplIdx) => {
+          try {
+            return trackSinglePoint(imgData, tpl, dt);
+          } catch {
+            return (mem?.livePoints && mem.livePoints[tplIdx]) || { x: 640, y: 360 };
+          }
+        });
+      }
+
+      // Verificar que ningún punto sea NaN
+      newPts = newPts.map((p, i) => {
+        const fallback = (action.points && action.points[i]) || { x: 640, y: 360 };
+        return {
+          x: Number.isFinite(p?.x) ? p.x : fallback.x,
+          y: Number.isFinite(p?.y) ? p.y : fallback.y,
+        };
+      });
+
+      mem.lastTime = currentTime;
+      mem.livePoints = newPts;
+      mem.liveTime = currentTime;
+
+      // Guardar un keyframe cada ~0.10 s para persistir la trayectoria del jugador
+      const kfs = action.keyframes ? [...action.keyframes] : [];
+      const lastKfTime = kfs.length > 0 ? kfs[kfs.length - 1].time : -999;
+      if (currentTime - lastKfTime >= 0.1) {
+        const roundedT = Math.round(currentTime * 100) / 100;
+        kfs.push({
+          time: roundedT,
+          points: newPts,
+          manual: false,
+        });
         nextActions[idx] = {
           ...action,
           trackPlayers: true,
-          keyframes: [
-            {
-              time: Math.round(action.timestamp * 100) / 100,
-              points: startPts.map((p) => ({ x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10 })),
-              manual: true,
-            },
-          ],
+          keyframes: kfs,
         };
         hasNewKeyframes = true;
       }
-      continue;
-    }
-
-    const dt = currentTime - mem.lastTime;
-    // Si el vídeo saltó hacia atrás o dio un salto largo, re-sincronizar con los keyframes existentes
-    if (dt < 0 || dt > 0.45) {
-      const interpPts = getInterpolatedPointsAtTime(action, currentTime);
-      const rigid = isRigidRadiusTool(action.tool);
-      const anchorPts = rigid ? [interpPts[0]] : interpPts;
-      mem.templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
-      mem.lastTime = currentTime;
-      mem.livePoints = interpPts;
-      mem.liveTime = currentTime;
-      continue;
-    }
-
-    // Si hay un keyframe manual posterior a currentTime, respetar la interpolación manual hasta pasar ese keyframe
-    const hasManualAhead = action.keyframes?.some(
-      (k) => k.manual && k.time > currentTime + 0.02
-    );
-    if (hasManualAhead) {
-      const interpPts = getInterpolatedPointsAtTime(action, currentTime);
-      mem.livePoints = interpPts;
-      mem.liveTime = currentTime;
-      mem.lastTime = currentTime;
-      // Si estamos muy cerca de un keyframe manual, actualizar plantilla en ese punto
-      const nearManual = action.keyframes?.find(
-        (k) => k.manual && Math.abs(k.time - currentTime) <= 0.08
-      );
-      if (nearManual) {
-        const rigid = isRigidRadiusTool(action.tool);
-        const anchorPts = rigid ? [nearManual.points[0]] : nearManual.points;
-        mem.templates = anchorPts.map((pt) => buildPointTemplate(imgData, pt));
-      }
-      continue;
-    }
-
-    if (dt < 0.015) continue;
-
-    // Rastrear cada punto de jugador en el nuevo fotograma
-    let newPts: { x: number; y: number }[];
-    if (mem.rigidFromFirstPoint) {
-      const trackedCenter = trackSinglePoint(imgData, mem.templates[0], dt);
-      newPts = [
-        trackedCenter,
-        ...mem.rigidOffsets.map((off) => ({
-          x: Math.round((trackedCenter.x + off.dx) * 10) / 10,
-          y: Math.round((trackedCenter.y + off.dy) * 10) / 10,
-        })),
-      ];
-    } else {
-      newPts = mem.templates.map((tpl) => trackSinglePoint(imgData, tpl, dt));
-    }
-
-    mem.lastTime = currentTime;
-    mem.livePoints = newPts;
-    mem.liveTime = currentTime;
-
-    // Guardar un keyframe cada ~0.10 s para persistir la trayectoria del jugador
-    const kfs = action.keyframes ? [...action.keyframes] : [];
-    const lastKfTime = kfs.length > 0 ? kfs[kfs.length - 1].time : -999;
-    if (currentTime - lastKfTime >= 0.1) {
-      const roundedT = Math.round(currentTime * 100) / 100;
-      kfs.push({
-        time: roundedT,
-        points: newPts,
-        manual: false,
-      });
-      nextActions[idx] = {
-        ...action,
-        trackPlayers: true,
-        keyframes: kfs,
-      };
-      hasNewKeyframes = true;
+    } catch (trackLoopErr) {
+      console.warn('Error en tracking del dibujo:', trackLoopErr);
     }
   }
 
