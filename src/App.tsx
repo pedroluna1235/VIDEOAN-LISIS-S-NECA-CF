@@ -2655,7 +2655,7 @@ ${xmlInstances}
                   onChange={(e) => handleFilesSelected(e.target.files)}
                 />
 
-                <div className="relative flex-1 w-full h-full flex items-stretch justify-stretch overflow-hidden bg-black">
+                <div className="relative flex-1 min-h-0 w-full h-full overflow-hidden bg-black">
                   {!activeVideo && (
                     <div
                       className={`absolute inset-0 flex flex-col items-center justify-center text-center px-6 z-10 ${
@@ -2694,22 +2694,68 @@ ${xmlInstances}
                   )}
 
                   <div
-                    className="relative w-full h-full transition-transform duration-150"
+                    className="absolute inset-0 w-full h-full overflow-hidden transition-transform duration-150"
                     style={{ transform: `scale(${videoZoom / 100})` }}
                   >
                     {activeVideo && (
                       <video
                         ref={videoRef}
                         src={activeVideo.url}
-                        className="w-full h-full object-fill block"
+                        className="object-fill block"
+                        style={{
+                          position: 'absolute',
+                          left: `${
+                            -(
+                              videoCropBounds.left /
+                              Math.max(0.2, videoCropBounds.right - videoCropBounds.left)
+                            ) * 100
+                          }%`,
+                          top: `${
+                            -(
+                              videoCropBounds.top /
+                              Math.max(0.2, videoCropBounds.bottom - videoCropBounds.top)
+                            ) * 100
+                          }%`,
+                          width: `${
+                            100 / Math.max(0.2, videoCropBounds.right - videoCropBounds.left)
+                          }%`,
+                          height: `${
+                            100 / Math.max(0.2, videoCropBounds.bottom - videoCropBounds.top)
+                          }%`,
+                          maxWidth: 'none',
+                          maxHeight: 'none',
+                          objectFit: 'fill',
+                          display: 'block',
+                        }}
                         onTimeUpdate={handleTimeUpdate}
                         onLoadedMetadata={() => {
                           if (videoRef.current) {
                             const dur = videoRef.current.duration;
                             setDuration(isFinite(dur) ? dur : activeVideo.duration || 60);
+                            refreshVideoCropBounds(videoRef.current, true);
                           }
                         }}
-                        onPlay={() => setIsPlaying(true)}
+                        onLoadedData={() => {
+                          if (videoRef.current) {
+                            refreshVideoCropBounds(videoRef.current, true);
+                          }
+                        }}
+                        onCanPlay={() => {
+                          if (videoRef.current) {
+                            refreshVideoCropBounds(videoRef.current, true);
+                          }
+                        }}
+                        onSeeked={() => {
+                          if (videoRef.current) {
+                            refreshVideoCropBounds(videoRef.current, true);
+                          }
+                        }}
+                        onPlay={() => {
+                          setIsPlaying(true);
+                          if (videoRef.current) {
+                            refreshVideoCropBounds(videoRef.current, true);
+                          }
+                        }}
                         onPause={() => setIsPlaying(false)}
                         onClick={() => {
                           if (!drawingMode) togglePlay();
@@ -2994,6 +3040,37 @@ ${xmlInstances}
                       className="w-7 h-7 bg-[#e6e6e6] hover:bg-white text-[#141414] font-bold text-xs flex items-center justify-center"
                     >
                       +
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        if (!autoCropBlackBars) {
+                          setAutoCropBlackBars(true);
+                          setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 30);
+                          notify('Ajuste automático sin bandas negras activado');
+                        } else if (videoRef.current) {
+                          const det = detectVideoCropBounds(videoRef.current);
+                          if (det) {
+                            setVideoCropBounds(det);
+                            setActiveVideoCropBounds(det);
+                            notify('Encuadre ajustado al 100% del visor sin espacios en negro');
+                          } else {
+                            setAutoCropBlackBars(false);
+                            const full = { left: 0, right: 1, top: 0, bottom: 1 };
+                            setVideoCropBounds(full);
+                            setActiveVideoCropBounds(full);
+                            notify('Mostrando fotograma completo original');
+                          }
+                        }
+                      }}
+                      className={`px-2.5 py-1 text-xs font-semibold transition flex items-center gap-1 ${
+                        autoCropBlackBars
+                          ? 'bg-[#cc2016] text-white hover:bg-[#a81810]'
+                          : 'bg-[#1b1b1b] text-gray-300 hover:bg-[#2c2c2c]'
+                      }`}
+                      title="Elimina automáticamente las franjas negras laterales y superiores/inferiores del vídeo"
+                    >
+                      <span>Sin bordes negros</span>
                     </button>
                   </div>
                 </div>

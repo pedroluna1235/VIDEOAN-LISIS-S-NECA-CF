@@ -53,6 +53,210 @@ interface ActionTrackerState {
 
 const trackerMap = new Map<string, ActionTrackerState>();
 
+export interface VideoCropBounds {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+
+let activeCropBounds: VideoCropBounds = { left: 0, right: 1, top: 0, bottom: 1 };
+
+export function setActiveVideoCropBounds(bounds: VideoCropBounds): void {
+  activeCropBounds = bounds;
+}
+
+export function getActiveVideoCropBounds(): VideoCropBounds {
+  return activeCropBounds;
+}
+
+let cropDetectCanvas: HTMLCanvasElement | null = null;
+let cropDetectCtx: CanvasRenderingContext2D | null = null;
+const CROP_W = 240;
+const CROP_H = 135;
+
+/**
+ * Dibuja el fotograma actual del vídeo recortando automáticamente cualquier banda negra
+ * (letterbox / pillarbox / bordes de grabación de pantalla) para que el partido ocupe el 100%.
+ */
+export function drawVideoFrameCropped(
+  ctx: CanvasRenderingContext2D,
+  videoEl: HTMLVideoElement,
+  destW: number,
+  destH: number,
+  customBounds?: VideoCropBounds
+): void {
+  const b = customBounds || activeCropBounds;
+  const vw = videoEl.videoWidth;
+  const vh = videoEl.videoHeight;
+  if (vw > 0 && vh > 0 && (b.left > 0.001 || b.right < 0.999 || b.top > 0.001 || b.bottom < 0.999)) {
+    const sx = Math.max(0, Math.min(vw - 1, b.left * vw));
+    const sy = Math.max(0, Math.min(vh - 1, b.top * vh));
+    const sw = Math.max(1, Math.min(vw - sx, (b.right - b.left) * vw));
+    const sh = Math.max(1, Math.min(vh - sy, (b.bottom - b.top) * vh));
+    ctx.drawImage(videoEl, sx, sy, sw, sh, 0, 0, destW, destH);
+  } else {
+    ctx.drawImage(videoEl, 0, 0, destW, destH);
+  }
+}
+
+/**
+ * Detecta automáticamente bandas negras (laterales, superiores e inferiores) dentro del propio archivo de vídeo
+ * (muy común en grabaciones de pantalla .mov/.mp4) y devuelve el rectángulo útil del partido [0..1].
+ */
+export function detectVideoCropBounds(videoEl: HTMLVideoElement | null): VideoCropBounds | null {
+  if (typeof document === 'undefined' || !videoEl || videoEl.readyState < 2) return null;
+  if (!videoEl.videoWidth || !videoEl.videoHeight) return null;
+
+  if (!cropDetectCanvas) {
+    cropDetectCanvas = document.createElement('canvas');
+    cropDetectCanvas.width = CROP_W;
+    cropDetectCanvas.height = CROP_H;
+    cropDetectCtx = cropDetectCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (!cropDetectCtx) return null;
+
+  let data: Uint8ClampedArray;
+  try {
+    cropDetectCtx.drawImage(videoEl, 0, 0, CROP_W, CROP_H);
+    data = cropDetectCtx.getImageData(0, 0, CROP_W, CROP_H).data;
+  } catch {
+    return null;
+  }
+
+  // 1. Detectar columnas con contenido real del partido (ignorando bandas negras laterales)
+  const yStart = Math.floor(CROP_H * 0.14);
+  const yEnd = Math.floor(CROP_H * 0.86);
+  const colSampleCount = Math.max(1, yEnd - yStart + 1);
+  const isContentCol = new Uint8Array(CROP_W);
+
+  for (let x = 0; x < CROP_W; x++) {
+    let brightPixels = 0;
+    let lumaSum = 0;
+    for (let y = yStart; y <= yEnd; y++) {
+      const idx = (y * CROP_W + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const maxC = Math.max(r, g, b);
+      const sumC = r + g + b;
+      lumaSum += sumC / 3;
+      if (maxC > 26 && sumC > 55) {
+        brightPixels++;
+      }
+    }
+    const activeRatio = brightPixels / colSampleCount;
+    const meanLuma = lumaSum / colSampleCount;
+    if (activeRatio > 0.2 && meanLuma > 16) {
+      isContentCol[x] = 1;
+    }
+  }
+
+  // Rellenar pequeños huecos de 1-2 columnas dentro del partido
+  for (let x = 1; x < CROP_W - 1; x++) {
+    if (!isContentCol[x] && isContentCol[x - 1] && (isContentCol[x + 1] || (x + 2 < CROP_W && isContentCol[x + 2]))) {
+      isContentCol[x] = 1;
+    }
+  }
+
+  // Buscar el tramo continuo más largo de columnas con contenido (evita bordes finos de ventana en grabaciones)
+  let bestColStart = 0;
+  let bestColEnd = CROP_W - 1;
+  let bestColLen = 0;
+  let curStart = -1;
+
+  for (let x = 0; x < CROP_W; x++) {
+    if (isContentCol[x]) {
+      if (curStart === -1) curStart = x;
+      const len = x - curStart + 1;
+      if (len > bestColLen) {
+        bestColLen = len;
+        bestColStart = curStart;
+        bestColEnd = x;
+      }
+    } else {
+      curStart = -1;
+    }
+  }
+
+  // Si el fotograma está casi completamente negro (ej. fundido a negro), no recortar
+  if (bestColLen < CROP_W * 0.32) {
+    return null;
+  }
+
+  // 2. Detectar filas con contenido real dentro del tramo horizontal del partido
+  const xStart = Math.min(CROP_W - 1, bestColStart + 4);
+  const xEnd = Math.max(xStart, bestColEnd - 4);
+  const rowSampleCount = Math.max(1, xEnd - xStart + 1);
+  const isContentRow = new Uint8Array(CROP_H);
+
+  for (let y = 0; y < CROP_H; y++) {
+    let brightPixels = 0;
+    let lumaSum = 0;
+    for (let x = xStart; x <= xEnd; x++) {
+      const idx = (y * CROP_W + x) * 4;
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      const maxC = Math.max(r, g, b);
+      const sumC = r + g + b;
+      lumaSum += sumC / 3;
+      if (maxC > 26 && sumC > 55) {
+        brightPixels++;
+      }
+    }
+    const activeRatio = brightPixels / rowSampleCount;
+    const meanLuma = lumaSum / rowSampleCount;
+    if (activeRatio > 0.2 && meanLuma > 16) {
+      isContentRow[y] = 1;
+    }
+  }
+
+  for (let y = 1; y < CROP_H - 1; y++) {
+    if (!isContentRow[y] && isContentRow[y - 1] && (isContentRow[y + 1] || (y + 2 < CROP_H && isContentRow[y + 2]))) {
+      isContentRow[y] = 1;
+    }
+  }
+
+  let bestRowStart = 0;
+  let bestRowEnd = CROP_H - 1;
+  let bestRowLen = 0;
+  let curRowStart = -1;
+
+  for (let y = 0; y < CROP_H; y++) {
+    if (isContentRow[y]) {
+      if (curRowStart === -1) curRowStart = y;
+      const len = y - curRowStart + 1;
+      if (len > bestRowLen) {
+        bestRowLen = len;
+        bestRowStart = curRowStart;
+        bestRowEnd = y;
+      }
+    } else {
+      curRowStart = -1;
+    }
+  }
+
+  if (bestRowLen < CROP_H * 0.32) {
+    return null;
+  }
+
+  const insetX = 1.5 / CROP_W;
+  const insetY = 1.2 / CROP_H;
+
+  const left = bestColStart > 1 ? Math.min(0.4, bestColStart / CROP_W + insetX) : 0;
+  const right = bestColEnd < CROP_W - 2 ? Math.max(0.6, (bestColEnd + 1) / CROP_W - insetX) : 1;
+  const top = bestRowStart > 0 ? Math.min(0.35, bestRowStart / CROP_H + insetY) : 0;
+  const bottom = bestRowEnd < CROP_H - 1 ? Math.max(0.65, (bestRowEnd + 1) / CROP_H - insetY) : 1;
+
+  return {
+    left: Math.round(left * 1000) / 1000,
+    right: Math.round(right * 1000) / 1000,
+    top: Math.round(top * 1000) / 1000,
+    bottom: Math.round(bottom * 1000) / 1000,
+  };
+}
+
 let offscreenCanvas: HTMLCanvasElement | null = null;
 let offscreenCtx: CanvasRenderingContext2D | null = null;
 
@@ -442,7 +646,7 @@ export function captureDrawingTemplates(
   if (!ctx) return;
 
   try {
-    ctx.drawImage(videoEl, 0, 0, TRACK_W, TRACK_H);
+    drawVideoFrameCropped(ctx, videoEl, TRACK_W, TRACK_H);
     const imgData = ctx.getImageData(0, 0, TRACK_W, TRACK_H).data;
 
     const pts = overridePoints || action.points;
@@ -634,7 +838,7 @@ export function stepLivePlayerTracking(
 
   let imgData: Uint8ClampedArray;
   try {
-    ctx.drawImage(videoEl, 0, 0, TRACK_W, TRACK_H);
+    drawVideoFrameCropped(ctx, videoEl, TRACK_W, TRACK_H);
     imgData = ctx.getImageData(0, 0, TRACK_W, TRACK_H).data;
   } catch {
     return { hasNewKeyframes: false, updatedActions: actions };

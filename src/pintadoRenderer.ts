@@ -1,5 +1,5 @@
 import { DrawingAction } from './supabaseClient';
-import { getInterpolatedPointsAtTime, isRigidRadiusTool } from './playerTracker';
+import { getActiveVideoCropBounds, getInterpolatedPointsAtTime, isRigidRadiusTool } from './playerTracker';
 
 function hexToRgba(hex: string, alpha: number): string {
   const clean = hex.replace('#', '');
@@ -474,10 +474,15 @@ export function renderDrawingActions(
           try {
             const vw = videoElement.videoWidth || 1280;
             const vh = videoElement.videoHeight || 720;
-            const sx = Math.max(0, (start.x / 1280) * vw - (radius / 1280) * vw * 0.5);
-            const sy = Math.max(0, (start.y / 720) * vh - (radius / 720) * vh * 0.5);
-            const sw = Math.min(vw - sx, (radius / 1280) * vw);
-            const sh = Math.min(vh - sy, (radius / 720) * vh);
+            const cb = getActiveVideoCropBounds();
+            const cropX = cb.left * vw;
+            const cropY = cb.top * vh;
+            const cropW = Math.max(1, (cb.right - cb.left) * vw);
+            const cropH = Math.max(1, (cb.bottom - cb.top) * vh);
+            const sx = Math.max(0, cropX + (start.x / 1280) * cropW - (radius / 1280) * cropW * 0.5);
+            const sy = Math.max(0, cropY + (start.y / 720) * cropH - (radius / 720) * cropH * 0.5);
+            const sw = Math.min(vw - sx, (radius / 1280) * cropW);
+            const sh = Math.min(vh - sy, (radius / 720) * cropH);
             if (sw > 0 && sh > 0) {
               ctx.drawImage(videoElement, sx, sy, sw, sh, start.x - radius, start.y - radius, radius * 2, radius * 2);
             }
