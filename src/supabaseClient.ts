@@ -1,7 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'https://aojlwavrjxxpzupwchxr.supabase.co';
-export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFvamx3YXZyanh4cHp1cHdjaHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIyNjE5NjksImV4cCI6MjEwNzgzNzk2OX0.6gV-v3PJf9a4AOgtdnyM6XxEZ32M0ZYyZBTpS9EslO0';
+const metaEnv = (import.meta as unknown as { env?: Record<string, string | undefined> }).env || {};
+export const SUPABASE_URL = metaEnv.VITE_SUPABASE_URL || 'https://aojlwavrjxxpzupwchxr.supabase.co';
+export const SUPABASE_ANON_KEY = metaEnv.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFvamx3YXZyanh4cHp1cHdjaHhyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIyNjE5NjksImV4cCI6MjEwNzgzNzk2OX0.6gV-v3PJf9a4AOgtdnyM6XxEZ32M0ZYyZBTpS9EslO0';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 

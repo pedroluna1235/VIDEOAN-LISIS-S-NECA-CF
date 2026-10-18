@@ -2846,11 +2846,17 @@ ${xmlInstances}
                         onClick={() => {
                           const advanceQueue = activeFreezeOverlay.advanceQueueAfter;
                           setActiveFreezeOverlay(null);
-                          if (advanceQueue && clipQueue.length > 0) {
-                            const [, ...rest] = clipQueue;
-                            setClipQueue(rest);
-                            if (rest.length > 0) {
-                              activateClipPlayback(rest[0], { fromQueue: true });
+                          if (advanceQueue && playingQueue && playingQueue.length > 0) {
+                            if (playingQueueIndex + 1 < playingQueue.length) {
+                              const nextIdx = playingQueueIndex + 1;
+                              const nextClip = playingQueue[nextIdx];
+                              setPlayingQueueIndex(nextIdx);
+                              activateClipPlayback(nextClip, { fromQueue: true });
+                            } else {
+                              if (videoRef.current) videoRef.current.pause();
+                              setIsPlaying(false);
+                              setPlayingQueue(null);
+                              notify('Reproducción del grupo finalizada');
                             }
                             return;
                           }
