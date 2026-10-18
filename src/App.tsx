@@ -130,8 +130,8 @@ function sanitizeLoadedEvents(rawEvents: unknown): ClipEvent[] {
 }
 
 export default function App() {
-  // Navegación principal (todos desbloqueados gratuitamente)
-  const [activeTab, setActiveTab] = useState<'editor' | 'con_video' | 'sin_video'>('editor');
+  // Navegación principal (Botonera con vídeo activa por defecto)
+  const [activeTab, setActiveTab] = useState<'editor' | 'con_video' | 'sin_video'>('con_video');
 
   // Estado del proyecto actual y sincronización con Supabase
   const [projectId, setProjectId] = useState<string>('seneca-default-project');
@@ -2956,6 +2956,42 @@ ${xmlInstances}
 
     return (
       <div className={`space-y-3 ${isFs ? 'text-white' : 'text-gray-900'}`}>
+        {/* BANNER IDENTIFICATIVO DE LA BOTONERA */}
+        <div className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded shadow-sm ${isFs ? 'bg-[#181d28] border border-gray-700' : 'bg-[#161a22] text-white'}`}>
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 bg-[#cc2016] inline-block animate-pulse rounded-sm" />
+            <span className="font-condensed font-extrabold text-sm tracking-wider uppercase text-[#f5b800]">
+              BOTONERA TÁCTICA NACSPORT
+            </span>
+            <span className="text-gray-400 text-xs hidden sm:inline">·</span>
+            <span className="text-xs text-gray-300 font-medium hidden sm:inline">
+              Plantilla activa: <strong className="text-white">{botoneraTemplates.find((t) => t.id === activeTemplateId)?.name || 'Séneca Pro'}</strong>
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowBotoneraBuilderModal(true)}
+              className="px-2.5 py-1 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 font-condensed font-extrabold text-xs uppercase rounded flex items-center gap-1 transition shadow"
+              title="Añadir categorías, cambiar colores, tiempos y atajos"
+            >
+              <Sliders className="w-3.5 h-3.5 text-black" />
+              <span>🛠 Crear / Editar Botonera</span>
+            </button>
+
+            {!isFs && (
+              <button
+                onClick={() => enterBotoneraFullscreen()}
+                className="px-2.5 py-1 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-extrabold text-xs uppercase rounded flex items-center gap-1 transition shadow"
+                title="Ver a Pantalla Completa (o pulsa tecla F)"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>⚡ Pantalla Completa (F)</span>
+              </button>
+            )}
+          </div>
+        </div>
+
         {/* FILA 1: EQUIPO, POSICIÓN/JUGADOR, ÉXITO/NEGATIVO, ZONA Y ACCESO A CONSTRUCTOR */}
         <div
           className={`p-2.5 rounded border flex flex-wrap items-center justify-between gap-2 ${
@@ -3547,24 +3583,14 @@ ${xmlInstances}
 
               <nav className="flex items-center h-full ml-3 gap-1">
                 <button
-                  onClick={() => setActiveTab('editor')}
-                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
-                    activeTab === 'editor'
-                      ? 'bg-white text-[#141414] border-[#cc2016]'
-                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
-                  }`}
-                >
-                  EDITOR BÁSICO
-                </button>
-                <button
                   onClick={() => setActiveTab('con_video')}
-                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
+                  className={`h-full px-4 font-condensed font-extrabold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
                     activeTab === 'con_video'
-                      ? 'bg-white text-[#141414] border-[#cc2016]'
+                      ? 'bg-white text-[#cc2016] border-[#cc2016]'
                       : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
                   }`}
                 >
-                  REGISTRO CON VÍDEO
+                  ⚡ BOTONERA NACSPORT (VÍDEO)
                 </button>
                 <button
                   onClick={() => setActiveTab('sin_video')}
@@ -3574,7 +3600,17 @@ ${xmlInstances}
                       : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
                   }`}
                 >
-                  REGISTRO SIN VÍDEO
+                  REGISTRO SIN VÍDEO (CAMPO)
+                </button>
+                <button
+                  onClick={() => setActiveTab('editor')}
+                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
+                    activeTab === 'editor'
+                      ? 'bg-white text-[#141414] border-[#cc2016]'
+                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
+                  }`}
+                >
+                  SOLO LÍNEA DE TIEMPO
                 </button>
               </nav>
             </div>
@@ -3590,21 +3626,21 @@ ${xmlInstances}
               {/* Botón Abrir Botonera a Pantalla Completa */}
               <button
                 onClick={() => enterBotoneraFullscreen()}
-                className="h-[32px] px-3 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm animate-pulse hover:animate-none"
+                className="h-[34px] px-3.5 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition shadow-md ring-2 ring-red-500/50"
                 title="Abrir la Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
               >
-                <Maximize2 className="w-3.5 h-3.5" />
-                <span>Botonera Pantalla Completa</span>
+                <Maximize2 className="w-4 h-4" />
+                <span>⚡ BOTONERA PANTALLA COMPLETA</span>
               </button>
 
               {/* Botón Crear / Personalizar Botonera */}
               <button
                 onClick={() => setShowBotoneraBuilderModal(true)}
-                className="h-[32px] px-2.5 bg-[#252830] hover:bg-[#343842] border border-gray-700 text-[#f5b800] hover:text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm"
+                className="h-[34px] px-3 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 rounded text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 transition shadow-md"
                 title="Crear y Personalizar Botonera como en Nacsport"
               >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Crear Botonera</span>
+                <Sliders className="w-4 h-4 text-black" />
+                <span>🛠 CREAR BOTONERA</span>
               </button>
 
               {/* Botón Matriz de Datos Cruzados estilo Nacsport */}
@@ -3900,6 +3936,35 @@ ${xmlInstances}
                     />
                   </div>
 
+                  {/* BOTONES FLOTANTES SOBRE EL VÍDEO (Siempre visibles incluso en pantalla completa del reproductor) */}
+                  <div className="absolute top-3 right-3 z-30 flex items-center gap-2 pointer-events-auto">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (document.fullscreenElement) {
+                          document.exitFullscreen().catch(() => {});
+                        }
+                        enterBotoneraFullscreen();
+                      }}
+                      className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-condensed font-extrabold uppercase tracking-wider rounded shadow-2xl flex items-center gap-1.5 border border-white/30 backdrop-blur transition hover:scale-105"
+                      title="Abrir la Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      <span>⚡ Botonera Pantalla Completa</span>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowBotoneraBuilderModal(true);
+                      }}
+                      className="px-3 py-1.5 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 text-xs font-condensed font-extrabold uppercase tracking-wider rounded shadow-2xl flex items-center gap-1.5 border border-yellow-200 backdrop-blur transition hover:scale-105"
+                      title="Crear y Personalizar Botonera como en Nacsport"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-black" />
+                      <span>🛠 Crear Botonera</span>
+                    </button>
+                  </div>
+
                   {/* Indicador de Imagen Parada / Pausa Táctica Insertada en el Vídeo */}
                   {activeFreezeOverlay && (
                     <div className="absolute top-3 left-3 z-30 flex items-center gap-2.5 bg-[#15181d]/95 border-l-4 border-[#cc2016] text-white px-3 py-1.5 shadow-lg">
@@ -4162,12 +4227,37 @@ ${xmlInstances}
                       {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                     </button>
 
+                    {/* BOTONES DIRECTOS DE BOTONERA EN LA BARRA DEL REPRODUCTOR */}
+                    <button
+                      onClick={() => {
+                        if (document.fullscreenElement) {
+                          document.exitFullscreen().catch(() => {});
+                        }
+                        enterBotoneraFullscreen();
+                      }}
+                      className="px-3 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow"
+                      title="Abrir Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      <span>⚡ Botonera Pantalla Completa</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowBotoneraBuilderModal(true)}
+                      className="px-3 py-1.5 bg-[#f5b800] hover:bg-[#e0a800] text-gray-950 text-xs font-condensed font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow"
+                      title="Crear y Personalizar Botonera como en Nacsport"
+                    >
+                      <Sliders className="w-3.5 h-3.5 text-black" />
+                      <span>🛠 Crear Botonera</span>
+                    </button>
+
                     <button
                       onClick={handleToggleFullscreen}
-                      className="px-3 py-1.5 bg-[#1b1b1b] hover:bg-[#2c2c2c] text-gray-200 text-xs flex items-center gap-1.5"
+                      className="px-2.5 py-1.5 bg-[#1b1b1b] hover:bg-[#2c2c2c] text-gray-300 text-xs flex items-center gap-1.5"
+                      title="Pantalla completa únicamente del visor de vídeo"
                     >
                       <Maximize className="w-3.5 h-3.5" />
-                      <span>Editor a pantalla completa</span>
+                      <span>Solo vídeo</span>
                     </button>
 
                     <div className="flex items-center bg-[#e6e6e6] text-[#141414] px-2 py-1 text-xs font-medium">
@@ -4261,8 +4351,8 @@ ${xmlInstances}
                 </div>
               )}
 
-              {/* Botonera Nacsport en "REGISTRO CON VÍDEO" (modo estándar no fullscreen) */}
-              {activeTab === 'con_video' && !isBotoneraFullscreen && (
+              {/* Botonera Nacsport siempre visible debajo del visor de vídeo */}
+              {!isBotoneraFullscreen && (
                 <div className="bg-white border-b border-gray-300 px-3 py-2.5">
                   {renderNacsportBotonera(false)}
                 </div>
