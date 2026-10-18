@@ -331,7 +331,7 @@ export default function App() {
   const [multiPointDraft, setMultiPointDraft] = useState<DrawingAction | null>(null);
   const [activeFreezeOverlay, setActiveFreezeOverlay] = useState<{
     eventId: string;
-    dataUrl: string;
+    dataUrl?: string;
     remaining: number;
     total: number;
     resumeAfter: boolean;
@@ -807,12 +807,11 @@ export default function App() {
     if (!videoRef.current) return;
     const t = videoRef.current.currentTime;
     setCurrentTime(t);
-    refreshVideoCropBounds(videoRef.current);
 
     // Pausa táctica automática cuando el vídeo pasa por una Imagen Parada insertada (el vídeo se detiene por completo)
     if (!videoRef.current.paused && !activeFreezeOverlay) {
       for (const ev of events) {
-        if (ev.isFreezeInsert && ev.drawingDataUrl) {
+        if (ev.isFreezeInsert) {
           const ft = ev.freezeTimestamp ?? ev.startTime;
           if (Math.abs(t - ft) > 0.9) {
             triggeredFreezeIdsRef.current.delete(ev.id);
@@ -867,25 +866,29 @@ export default function App() {
     drawingsRef.current = drawings;
   }, [drawings]);
 
-  // Bucle a 60fps para seguimiento automático en vivo de jugadores (Conector, Foco, Radar, etc.) cuando el vídeo corre
+  // Bucle a 60fps para seguimiento y renderizado fluido en vivo de jugadores cuando el vídeo corre
   useEffect(() => {
     if (!isPlaying || activeFreezeOverlay) return;
     let rafId = 0;
-    let lastStateSync = performance.now();
+    let lastTrackTime = 0;
 
-    const tick = () => {
+    const tick = (now: number) => {
       try {
         const videoEl = videoRef.current;
         const canvas = overlayCanvasRef.current;
-        if (videoEl && !videoEl.paused && canvas) {
+        if (videoEl && !videoEl.paused && canvas && drawingsRef.current.length > 0) {
           const t = videoEl.currentTime;
-          const { hasNewKeyframes, updatedActions } = stepLivePlayerTracking(
-            videoEl,
-            drawingsRef.current,
-            t
-          );
-          if (hasNewKeyframes) {
-            drawingsRef.current = updatedActions;
+          // Ejecutar análisis de tracking a ~22 fps (cada 45 ms) para máximo rendimiento sin saturar memoria
+          if (now - lastTrackTime >= 45) {
+            lastTrackTime = now;
+            const { hasNewKeyframes, updatedActions } = stepLivePlayerTracking(
+              videoEl,
+              drawingsRef.current,
+              t
+            );
+            if (hasNewKeyframes) {
+              drawingsRef.current = updatedActions;
+            }
           }
           const ctx = canvas.getContext('2d');
           if (ctx) {
@@ -927,11 +930,11 @@ export default function App() {
     renderDrawingActions(ctx, allToRender, {
       currentTime: videoRef.current && isPlaying ? videoRef.current.currentTime : currentTime,
       selectedId: selectedDrawingId,
-      ignoreTimeVisibility: drawingMode && !isPlaying,
+      ignoreTimeVisibility: (drawingMode && !isPlaying) || Boolean(activeFreezeOverlay),
       videoElement: videoRef.current,
       senecaLogoImg: senecaLogoRef.current,
     });
-  }, [drawings, currentDraftAction, multiPointDraft, currentTime, selectedDrawingId, drawingMode, isPlaying]);
+  }, [drawings, currentDraftAction, multiPointDraft, currentTime, selectedDrawingId, drawingMode, isPlaying, activeFreezeOverlay]);
 
   const selectedDrawingObj = drawings.find((d) => d.id === selectedDrawingId) || null;
 
@@ -1368,12 +1371,14 @@ export default function App() {
 
   const buildCompositeCanvasDataUrl = (
     format: 'png' | 'jpeg' = 'jpeg',
-    customDrawings?: DrawingAction[]
+    customDrawings?: DrawingAction[],
+    targetWidth = 1280,
+    targetHeight = 720
   ): string | null => {
     try {
       const outCanvas = document.createElement('canvas');
-      outCanvas.width = 1280;
-      outCanvas.height = 720;
+      outCanvas.width = targetWidth;
+      outCanvas.height = targetHeight;
       const ctx = outCanvas.getContext('2d');
       if (!ctx) return null;
 
@@ -1393,6 +1398,10 @@ export default function App() {
         drawPitchFallback(ctx, outCanvas.width, outCanvas.height);
       }
 
+      ctx.save();
+      if (targetWidth !== 1280 || targetHeight !== 720) {
+        ctx.scale(targetWidth / 1280, targetHeight / 720);
+      }
       renderDrawingActions(ctx, listToDraw, {
         currentTime: safeTime,
         selectedId: null,
@@ -1400,45 +1409,27 @@ export default function App() {
         videoElement: videoRef.current,
         senecaLogoImg: senecaLogoRef.current,
       });
+      ctx.restore();
 
-      ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
-      ctx.fillRect(24, 658, 330, 42);
-      ctx.fillStyle = '#cc2016';
-      ctx.fillRect(24, 658, 7, 42);
-      ctx.fillStyle = '#f5b800';
-      ctx.font = 'bold 16px "Barlow Condensed", sans-serif';
-      ctx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(safeTime)}`, 42, 684);
+      if (targetWidth >= 600) {
+        ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
+        ctx.fillRect(24, targetHeight - 62, 330, 42);
+        ctx.fillStyle = '#cc2016';
+        ctx.fillRect(24, targetHeight - 62, 7, 42);
+        ctx.fillStyle = '#f5b800';
+        ctx.font = 'bold 16px "Barlow Condensed", sans-serif';
+        ctx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(safeTime)}`, 42, targetHeight - 36);
+      }
 
       try {
         return format === 'png'
           ? outCanvas.toDataURL('image/png')
-          : outCanvas.toDataURL('image/jpeg', 0.84);
+          : outCanvas.toDataURL('image/jpeg', targetWidth < 600 ? 0.65 : 0.84);
       } catch {
-        // Fallback si el vídeo o imagen externa bloquea el canvas por CORS
-        const cleanCanvas = document.createElement('canvas');
-        cleanCanvas.width = 1280;
-        cleanCanvas.height = 720;
-        const cleanCtx = cleanCanvas.getContext('2d');
-        if (!cleanCtx) return null;
-        drawPitchFallback(cleanCtx, 1280, 720);
-        renderDrawingActions(cleanCtx, listToDraw, {
-          currentTime: safeTime,
-          selectedId: null,
-          ignoreTimeVisibility: true,
-          videoElement: null,
-          senecaLogoImg: null,
-        });
-        cleanCtx.fillStyle = 'rgba(20, 20, 20, 0.88)';
-        cleanCtx.fillRect(24, 658, 330, 42);
-        cleanCtx.fillStyle = '#cc2016';
-        cleanCtx.fillRect(24, 658, 7, 42);
-        cleanCtx.fillStyle = '#f5b800';
-        cleanCtx.font = 'bold 16px "Barlow Condensed", sans-serif';
-        cleanCtx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(safeTime)}`, 42, 684);
-        return cleanCanvas.toDataURL('image/jpeg', 0.84);
+        return null;
       }
     } catch (err) {
-      console.error('Error generando imagen compuesta del pintado:', err);
+      console.warn('Aviso generando miniatura del pintado:', err);
       return null;
     }
   };
@@ -1575,11 +1566,8 @@ export default function App() {
       setDrawings(updatedDrawings);
       setSelectedDrawingId(null);
 
-      const dataUrl = buildCompositeCanvasDataUrl('jpeg', updatedDrawings);
-      if (!dataUrl) {
-        notify('No se pudo insertar el pintado en el vídeo');
-        return;
-      }
+      // Miniatura ligera (320x180) para la lista de eventos y capturas
+      const dataUrl = buildCompositeCanvasDataUrl('jpeg', updatedDrawings, 320, 180) || '';
 
       const newCap: CaptureItem = {
         id: `cap-${Date.now()}`,
@@ -1638,16 +1626,21 @@ export default function App() {
       if (isStill) {
         // Mantiene la imagen totalmente parada en el visor sin que el vídeo siga corriendo
         triggeredFreezeIdsRef.current.add(newEvent.id);
+        if (videoRef.current) {
+          videoRef.current.currentTime = safeTime;
+          videoRef.current.pause();
+          setIsPlaying(false);
+        }
         setActiveFreezeOverlay({
           eventId: newEvent.id,
           dataUrl,
           remaining: freezeSecs,
           total: freezeSecs,
           resumeAfter: false,
-          manualHold: true,
+          manualHold: isManualHold,
         });
         notify(
-          `Imagen parada (${labelDuration}) insertada: el vídeo se detendrá en este fotograma sin seguir corriendo`
+          `Imagen parada (${labelDuration}) insertada: el vídeo se detiene en este fotograma con la pizarra táctica`
         );
       } else {
         setActiveFreezeOverlay(null);
@@ -3903,24 +3896,7 @@ ${xmlInstances}
                       />
                     )}
 
-                    {/* Fotograma de Pizarra Táctica insertado en el vídeo (pausa activa o evento seleccionado) */}
-                    {(activeFreezeOverlay?.dataUrl ||
-                      (!drawingMode &&
-                        !isPlaying &&
-                        currentPlayingEvent?.isFreezeInsert &&
-                        currentPlayingEvent?.drawingDataUrl &&
-                        drawings.length === 0)) && (
-                      <img
-                        src={activeFreezeOverlay?.dataUrl || currentPlayingEvent?.drawingDataUrl}
-                        alt="Pintado Táctico Insertado"
-                        onClick={() => {
-                          if (!drawingMode) togglePlay();
-                        }}
-                        className="absolute inset-0 w-full h-full object-fill z-10 cursor-pointer block"
-                      />
-                    )}
-
-                    {/* Canvas para PINTADO DE ACCIONES + KLIPDRAW */}
+                    {/* Canvas para PINTADO DE ACCIONES + KLIPDRAW (Siempre visible directamente sobre el vídeo) */}
                     <canvas
                       ref={overlayCanvasRef}
                       width={1280}
@@ -3930,8 +3906,6 @@ ${xmlInstances}
                       onMouseUp={handleCanvasMouseUp}
                       onDoubleClick={handleCanvasDoubleClick}
                       className={`absolute inset-0 w-full h-full object-fill z-20 block ${
-                        activeFreezeOverlay && !drawingMode ? 'opacity-0 pointer-events-none' : ''
-                      } ${
                         drawingMode
                           ? isMoveMode
                             ? 'cursor-move pointer-events-auto'

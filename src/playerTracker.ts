@@ -52,6 +52,7 @@ interface ActionTrackerState {
 }
 
 const trackerMap = new Map<string, ActionTrackerState>();
+let sharedCostGrid: Float32Array | null = null;
 
 export interface VideoCropBounds {
   left: number;
@@ -566,14 +567,16 @@ function trackSinglePoint(
     const maxX = Math.min(TRACK_W - PATCH_HALF_W - 2, Math.max(minX + 1, centerX + searchRx));
     const minY = Math.max(PATCH_HALF_H + 1, centerY - searchRy);
     const maxY = Math.min(TRACK_H - PATCH_HALF_H - 2, Math.max(minY + 1, centerY + searchRy));
-
     let bestX = centerX;
     let bestY = centerY;
     let bestCost = Infinity;
 
     const widthSpan = Math.max(1, maxX - minX + 1);
     const heightSpan = Math.max(1, maxY - minY + 1);
-    const costGrid = new Float32Array(widthSpan * heightSpan);
+    if (!sharedCostGrid || sharedCostGrid.length < widthSpan * heightSpan) {
+      sharedCostGrid = new Float32Array(Math.max(512, widthSpan * heightSpan));
+    }
+    const costGrid = sharedCostGrid;
 
     for (let cy = minY; cy <= maxY; cy++) {
       for (let cx = minX; cx <= maxX; cx++) {
