@@ -2478,7 +2478,7 @@ ${xmlInstances}
                   handleFilesSelected(e.dataTransfer.files);
                 }}
                 className={`relative w-full bg-black flex flex-col justify-between overflow-hidden ${
-                  activeTab === 'con_video' ? 'h-[395px]' : 'h-[455px]'
+                  activeTab === 'con_video' ? 'h-[420px]' : 'h-[490px]'
                 } ${isDraggingOver ? 'ring-4 ring-[#cc2016]' : ''}`}
               >
                 <input
@@ -2490,7 +2490,7 @@ ${xmlInstances}
                   onChange={(e) => handleFilesSelected(e.target.files)}
                 />
 
-                <div className="relative flex-1 flex items-center justify-center overflow-hidden bg-black">
+                <div className="relative flex-1 w-full h-full flex items-stretch justify-stretch overflow-hidden bg-black">
                   {!activeVideo && (
                     <div
                       className={`absolute inset-0 flex flex-col items-center justify-center text-center px-6 z-10 ${
@@ -2529,14 +2529,14 @@ ${xmlInstances}
                   )}
 
                   <div
-                    className="relative w-full h-full flex items-center justify-center transition-transform duration-150"
+                    className="relative w-full h-full transition-transform duration-150"
                     style={{ transform: `scale(${videoZoom / 100})` }}
                   >
                     {activeVideo && (
                       <video
                         ref={videoRef}
                         src={activeVideo.url}
-                        className="max-w-full max-h-full object-contain"
+                        className="w-full h-full object-fill block"
                         onTimeUpdate={handleTimeUpdate}
                         onLoadedMetadata={() => {
                           if (videoRef.current) {
@@ -2565,7 +2565,7 @@ ${xmlInstances}
                         onClick={() => {
                           if (!drawingMode) togglePlay();
                         }}
-                        className="absolute inset-0 w-full h-full object-contain z-10 cursor-pointer"
+                        className="absolute inset-0 w-full h-full object-fill z-10 cursor-pointer block"
                       />
                     )}
 
@@ -2578,7 +2578,7 @@ ${xmlInstances}
                       onMouseMove={handleCanvasMouseMove}
                       onMouseUp={handleCanvasMouseUp}
                       onDoubleClick={handleCanvasDoubleClick}
-                      className={`absolute inset-0 w-full h-full object-contain z-20 ${
+                      className={`absolute inset-0 w-full h-full object-fill z-20 block ${
                         activeFreezeOverlay && !drawingMode ? 'opacity-0 pointer-events-none' : ''
                       } ${
                         drawingMode
