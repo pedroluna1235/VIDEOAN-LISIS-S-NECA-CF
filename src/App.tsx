@@ -701,10 +701,6 @@ export default function App() {
               notify('Reproducción del grupo finalizada');
             }
           } else if (prev.resumeAfter && videoRef.current && activeVideo) {
-            videoRef.current.currentTime = Math.min(
-              duration || 99999,
-              videoRef.current.currentTime + 0.2
-            );
             videoRef.current.play().catch(() => {});
             setIsPlaying(true);
           }
@@ -2569,14 +2565,26 @@ export default function App() {
 
     await new Promise<void>((res) => {
       videoEl.pause();
-      videoEl.currentTime = clip.startTime;
-      const onSeek = () => {
-        videoEl.removeEventListener('seeked', onSeek);
+      const prevMuted = videoEl.muted;
+      const prevRate = videoEl.playbackRate;
+      videoEl.muted = true;
+      videoEl.playbackRate = 1.0;
+
+      let hasStarted = false;
+      let lastTrackPerf = 0;
+
+      const startPlayback = () => {
+        if (hasStarted) return;
+        hasStarted = true;
+        videoEl.removeEventListener('seeked', startPlayback);
+        videoEl.playbackRate = 1.0;
         videoEl.play().catch(() => {});
 
         const step = async () => {
           if (videoEl.currentTime >= clip.endTime || videoEl.ended) {
             videoEl.pause();
+            videoEl.muted = prevMuted;
+            videoEl.playbackRate = prevRate;
             res();
             return;
           }
@@ -2584,7 +2592,7 @@ export default function App() {
           const hitFreeze = nestedFreezes.find(
             (nf) =>
               !usedNestedIds.has(nf.id) &&
-              Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.25
+              Math.abs(videoEl.currentTime - (nf.freezeTimestamp ?? nf.startTime)) <= 0.22
           );
 
           if (hitFreeze) {
@@ -2616,16 +2624,35 @@ export default function App() {
               };
               requestAnimationFrame(loopHold);
             });
+            videoEl.playbackRate = 1.0;
             videoEl.play().catch(() => {});
           }
 
           drawVideoFrameCropped(ctx, videoEl, width, height);
-          const { updatedActions } = stepLivePlayerTracking(
-            videoEl,
-            drawingsRef.current,
-            videoEl.currentTime
-          );
-          drawingsRef.current = updatedActions;
+
+          // Optimización: Limitar el cálculo de visión artificial por tracking a ~10 fps (cada 100ms)
+          // solo si algún dibujo aún no tiene keyframes calculados. El renderizado visual de los
+          // dibujos se interpola suavemente a 60fps usando sus puntos sin ralentizar el hilo gráfico.
+          const nowPerf = performance.now();
+          if (nowPerf - lastTrackPerf >= 100) {
+            lastTrackPerf = nowPerf;
+            const hasUntracked = drawingsRef.current.some(
+              (a) => a.trackPlayers !== false && (!a.keyframes || a.keyframes.length === 0)
+            );
+            if (hasUntracked) {
+              try {
+                const { updatedActions } = stepLivePlayerTracking(
+                  videoEl,
+                  drawingsRef.current,
+                  videoEl.currentTime
+                );
+                drawingsRef.current = updatedActions;
+              } catch (e) {
+                console.warn('Tracking export warning:', e);
+              }
+            }
+          }
+
           ctx.save();
           ctx.scale(width / 1280, height / 720);
           renderDrawingActions(ctx, drawingsRef.current, {
@@ -2642,7 +2669,16 @@ export default function App() {
 
         requestAnimationFrame(step);
       };
-      videoEl.addEventListener('seeked', onSeek);
+
+      if (Math.abs(videoEl.currentTime - clip.startTime) < 0.04 && videoEl.readyState >= 2) {
+        startPlayback();
+      } else {
+        videoEl.addEventListener('seeked', startPlayback, { once: true });
+        videoEl.currentTime = clip.startTime;
+        setTimeout(() => {
+          if (!hasStarted) startPlayback();
+        }, 350);
+      }
     });
   };
 
@@ -2663,7 +2699,7 @@ export default function App() {
     ctx.imageSmoothingQuality = 'high';
 
     const stream = exportCanvas.captureStream(fps);
-    const bitrate = exportResolution === '1080p' ? 14_000_000 : 8_500_000;
+    const bitrate = exportResolution === '1080p' ? 10_000_000 : 6_000_000;
     let mimeType = 'video/webm;codecs=vp9';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4;codecs=avc1';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
@@ -2749,7 +2785,7 @@ export default function App() {
         ctx.imageSmoothingQuality = 'high';
 
         const stream = exportCanvas.captureStream(fps);
-        const bitrate = exportResolution === '1080p' ? 14_000_000 : 8_500_000;
+        const bitrate = exportResolution === '1080p' ? 10_000_000 : 6_000_000;
         let mimeType = 'video/webm;codecs=vp9';
         if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4;codecs=avc1';
         if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
