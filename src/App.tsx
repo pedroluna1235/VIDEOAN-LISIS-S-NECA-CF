@@ -97,6 +97,9 @@ import {
   Palette,
   Settings,
   Tv,
+  Activity,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react';
 
 interface HistorySnapshot {
@@ -409,6 +412,14 @@ export default function App() {
 
   // Campo para nueva plantilla
   const [newTemplateNameInput, setNewTemplateNameInput] = useState<string>('');
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+
+  const handleDeleteClip = (clipId: string) => {
+    const filtered = events.filter((item) => item.id !== clipId);
+    setEvents(filtered);
+    pushHistory({ events: filtered });
+    if (selectedEventId === clipId) setSelectedEventId(null);
+  };
 
   // Guardar plantillas y descriptores en LocalStorage
   useEffect(() => {
@@ -2029,27 +2040,341 @@ export default function App() {
     notify(`Acción "${newClip.name}" guardada (${newClip.player || 'Sin posición'} · ${outLabel})`);
   };
 
-  const handleQuickCategoryTag = (cat: TagCategory) => {
-    const baseTime = activeTab === 'sin_video' ? liveTimerSeconds : currentTime;
-    const pre = duration > 0 && duration <= 20 ? 1.2 : cat.preRoll;
-    const post = duration > 0 && duration <= 20 ? 1.5 : cat.postRoll;
-    const start = Number(Math.max(0, baseTime - pre).toFixed(1));
-    const endRaw = activeTab === 'sin_video' ? baseTime + post : Math.min(maxTimelineDuration, baseTime + post);
-    const end = Number(Math.max(start + 1.2, endRaw).toFixed(1));
+  const updateLastDirectTaggedClip = useCallback(
+    (patch: Partial<ClipEvent>) => {
+      if (!lastDirectTaggedClipId) return;
+      setEvents((prev) =>
+        prev.map((ev) => (ev.id === lastDirectTaggedClipId ? { ...ev, ...patch, userClassified: true } : ev))
+      );
+    },
+    [lastDirectTaggedClipId]
+  );
 
-    if (activeTab !== 'sin_video' && videoRef.current && !videoRef.current.paused) {
-      videoRef.current.pause();
-      setIsPlaying(false);
+  const handleQuickCategoryTag = useCallback(
+    (cat: TagCategory, forceMode?: 'auto' | 'manual') => {
+      const baseTime = activeTab === 'sin_video' ? liveTimerSeconds : currentTime;
+      const isManual = forceMode ? forceMode === 'manual' : cat.mode === 'manual';
+
+      let detectedHalf: '1ª Parte' | '2ª Parte' = liveHalf;
+      if (markers.secondHalfStart !== undefined && baseTime >= markers.secondHalfStart) {
+        detectedHalf = '2ª Parte';
+      } else if (markers.firstHalfStart !== undefined && baseTime >= markers.firstHalfStart) {
+        detectedHalf = '1ª Parte';
+      }
+
+      // Caso 1: Modo Manual (Inicio / Fin) estilo Nacsport
+      if (isManual) {
+        if (activeManualRecordings[cat.id]) {
+          // Cierre de la grabación manual
+          const rec = activeManualRecordings[cat.id];
+          const start = Number(rec.startTime.toFixed(1));
+          const end = Number(Math.max(start + 0.8, baseTime).toFixed(1));
+
+          setActiveManualRecordings((prev) => {
+            const next = { ...prev };
+            delete next[cat.id];
+            return next;
+          });
+
+          if (directOneClickMode) {
+            const newClip: ClipEvent = {
+              id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+              name: cat.name,
+              category: cat.name,
+              color: cat.color || '#cc2016',
+              startTime: start,
+              endTime: end,
+              videoId: activeVideo?.id || 'sin-video',
+              videoName: activeVideo?.name || 'Registro Directo',
+              team: rec.team,
+              player: rec.player || selectedPlayerTag || undefined,
+              zone: rec.zone || selectedPitchZone,
+              half: detectedHalf,
+              descriptors: rec.descriptors && rec.descriptors.length > 0 ? rec.descriptors : activeDescriptors,
+              userClassified: true,
+              createdAt: new Date().toISOString(),
+            };
+            const nextEvents = [...events, newClip];
+            setEvents(nextEvents);
+            pushHistory({ events: nextEvents });
+            setSelectedEventId(newClip.id);
+            setLastDirectTaggedClipId(newClip.id);
+            notify(`✓ Corte manual "${cat.name}" guardado (${formatTimecode(start)} - ${formatTimecode(end)})`);
+            return;
+          } else {
+            if (activeTab !== 'sin_video' && videoRef.current && !videoRef.current.paused) {
+              videoRef.current.pause();
+              setIsPlaying(false);
+            }
+            setEditingClipId(null);
+            setPendingClipRange({ start, end });
+            setNewClipCategory(cat.name);
+            setNewClipName(cat.name);
+            setNewClipTeam(rec.team);
+            setNewClipPlayer(rec.player || selectedPlayerTag);
+            setNewClipDescriptors(rec.descriptors.length > 0 ? rec.descriptors : activeDescriptors);
+            setNewClipNotes('');
+            return;
+          }
+        } else {
+          // Inicio de la grabación manual
+          setActiveManualRecordings((prev) => ({
+            ...prev,
+            [cat.id]: {
+              startTime: baseTime,
+              team: selectedTeamFilter,
+              player: selectedPlayerTag || undefined,
+              zone: selectedPitchZone,
+              descriptors: [...activeDescriptors],
+            },
+          }));
+          notify(
+            `● GRABANDO "${cat.name}" desde ${formatTimecode(baseTime)}... Haz clic de nuevo o pulsa [${
+              cat.shortcut || 'tecla'
+            }] para cerrar`
+          );
+          return;
+        }
+      }
+
+      // Caso 2: Modo Automático con Pre-roll / Post-roll
+      const pre = duration > 0 && duration <= 20 ? 1.2 : cat.preRoll || 5;
+      const post = duration > 0 && duration <= 20 ? 1.5 : cat.postRoll || 5;
+      const start = Number(Math.max(0, baseTime - pre).toFixed(1));
+      const endRaw = activeTab === 'sin_video' ? baseTime + post : Math.min(maxTimelineDuration, baseTime + post);
+      const end = Number(Math.max(start + 1.2, endRaw).toFixed(1));
+
+      if (directOneClickMode) {
+        // Registro 1-Clic directo estilo Nacsport en vivo: no detiene el vídeo
+        const newClip: ClipEvent = {
+          id: `ev-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+          name: cat.name,
+          category: cat.name,
+          color: cat.color || '#cc2016',
+          startTime: start,
+          endTime: end,
+          videoId: activeVideo?.id || 'sin-video',
+          videoName: activeVideo?.name || 'Registro Directo',
+          team: selectedTeamFilter,
+          player: selectedPlayerTag || undefined,
+          zone: selectedPitchZone,
+          half: detectedHalf,
+          descriptors: [...activeDescriptors],
+          userClassified: true,
+          createdAt: new Date().toISOString(),
+        };
+        const nextEvents = [...events, newClip];
+        setEvents(nextEvents);
+        pushHistory({ events: nextEvents });
+        setSelectedEventId(newClip.id);
+        setLastDirectTaggedClipId(newClip.id);
+        const outLabel =
+          getClipOutcome(newClip.descriptors) === 'positivo'
+            ? '✓ Positivo'
+            : getClipOutcome(newClip.descriptors) === 'negativo'
+            ? '✕ Negativo'
+            : 'Neutro';
+        notify(
+          `⚡ Acción "${cat.name}" registrada [${formatTimecode(start)} - ${formatTimecode(end)}] (${
+            newClip.player || 'Colectivo'
+          } · ${outLabel})`
+        );
+        return;
+      }
+
+      // Modo con modal de clasificación
+      if (activeTab !== 'sin_video' && videoRef.current && !videoRef.current.paused) {
+        videoRef.current.pause();
+        setIsPlaying(false);
+      }
+
+      setEditingClipId(null);
+      setPendingClipRange({ start, end });
+      setNewClipCategory(cat.name);
+      setNewClipName(cat.name);
+      setNewClipTeam(selectedTeamFilter);
+      setNewClipPlayer(selectedPlayerTag);
+      setNewClipDescriptors(activeDescriptors);
+      setNewClipNotes('');
+    },
+    [
+      activeTab,
+      liveTimerSeconds,
+      currentTime,
+      liveHalf,
+      markers,
+      activeManualRecordings,
+      directOneClickMode,
+      activeVideo,
+      selectedPlayerTag,
+      selectedPitchZone,
+      activeDescriptors,
+      events,
+      pushHistory,
+      notify,
+      selectedTeamFilter,
+      duration,
+      maxTimelineDuration,
+      getClipOutcome,
+    ]
+  );
+
+  const enterBotoneraFullscreen = useCallback(
+    (layout?: 'split_video' | 'board_only') => {
+      if (layout) setBotoneraFullscreenLayout(layout);
+      setIsBotoneraFullscreen(true);
+      try {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen?.().catch(() => {});
+        }
+      } catch {}
+      notify('Botonera Nacsport en pantalla completa activada');
+    },
+    [notify]
+  );
+
+  const exitBotoneraFullscreen = useCallback(() => {
+    setIsBotoneraFullscreen(false);
+    try {
+      if (document.fullscreenElement) {
+        document.exitFullscreen?.().catch(() => {});
+      }
+    } catch {}
+    notify('Pantalla completa desactivada');
+  }, [notify]);
+
+  // Atajos de teclado en vivo para la botonera (1, 2, 3... Q, W... y tecla F para pantalla completa)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      if (
+        activeEl &&
+        (activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.tagName === 'SELECT' ||
+          (activeEl as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
+
+      if (e.key === 'Escape' && isBotoneraFullscreen) {
+        exitBotoneraFullscreen();
+        return;
+      }
+
+      if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        if (!isBotoneraFullscreen) {
+          enterBotoneraFullscreen();
+        } else {
+          exitBotoneraFullscreen();
+        }
+        return;
+      }
+
+      if (e.code === 'Space' && activeVideo && activeTab !== 'sin_video') {
+        e.preventDefault();
+        togglePlay();
+        return;
+      }
+
+      const keyUpper = e.key.toUpperCase();
+      const matchedCat = tagCategories.find((c) => c.shortcut && c.shortcut.toUpperCase() === keyUpper);
+      if (matchedCat) {
+        e.preventDefault();
+        handleQuickCategoryTag(matchedCat);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [tagCategories, isBotoneraFullscreen, activeVideo, activeTab, handleQuickCategoryTag, enterBotoneraFullscreen, exitBotoneraFullscreen]);
+
+  // Manejo de Plantillas de Botonera
+  const handleApplyTemplate = (tpl: BotoneraTemplate) => {
+    setActiveTemplateId(tpl.id);
+    setTagCategories(tpl.categories);
+    setCustomDescriptors(tpl.descriptors || NACSPORT_DESCRIPTORS);
+    setBotoneraColumns(tpl.columns || 5);
+    setBotoneraButtonSize(tpl.buttonSize || 'md');
+    setDirectOneClickMode(tpl.directOneClickMode !== false);
+    setShowPitchInBotonera(tpl.showPitchZones !== false);
+    setShowPlayersInBotonera(tpl.showPlayersGrid !== false);
+    notify(`Plantilla de botonera "${tpl.name}" cargada`);
+  };
+
+  const handleSaveCurrentAsTemplate = (name: string) => {
+    if (!name.trim()) return;
+    const newTpl: BotoneraTemplate = {
+      id: `tpl-${Date.now()}`,
+      name: name.trim(),
+      description: `Botonera personalizada creada (${tagCategories.length} categorías)`,
+      categories: [...tagCategories],
+      descriptors: [...customDescriptors],
+      columns: botoneraColumns,
+      buttonSize: botoneraButtonSize,
+      directOneClickMode,
+      showPitchZones: showPitchInBotonera,
+      showPlayersGrid: showPlayersInBotonera,
+    };
+    const nextTemplates = [...botoneraTemplates, newTpl];
+    setBotoneraTemplates(nextTemplates);
+    setActiveTemplateId(newTpl.id);
+    setNewTemplateNameInput('');
+    notify(`Nueva plantilla "${newTpl.name}" guardada con éxito`);
+  };
+
+  const handleDeleteTemplate = (id: string) => {
+    if (botoneraTemplates.length <= 1) {
+      notify('No puedes eliminar la única plantilla de botonera');
+      return;
     }
+    const filtered = botoneraTemplates.filter((t) => t.id !== id);
+    setBotoneraTemplates(filtered);
+    if (activeTemplateId === id) {
+      handleApplyTemplate(filtered[0]);
+    }
+    notify('Plantilla de botonera eliminada');
+  };
 
-    setEditingClipId(null);
-    setPendingClipRange({ start, end });
-    setNewClipCategory(cat.name);
-    setNewClipName(cat.name);
-    setNewClipTeam(selectedTeamFilter);
-    setNewClipPlayer(selectedPlayerTag);
-    setNewClipDescriptors(activeDescriptors);
-    setNewClipNotes('');
+  const handleAddNewCategory = () => {
+    if (!newCatName.trim()) {
+      notify('Indica un nombre para el botón de categoría');
+      return;
+    }
+    const shortcutAuto =
+      newCatShortcut.trim() ||
+      String(tagCategories.length < 9 ? tagCategories.length + 1 : tagCategories.length === 9 ? '0' : '');
+    const newCat: TagCategory = {
+      id: `cat-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+      name: newCatName.trim(),
+      color: newCatColor || '#cc2016',
+      shortcut: shortcutAuto,
+      preRoll: Number(newCatPreRoll) || 5,
+      postRoll: Number(newCatPostRoll) || 5,
+      type: newCatType,
+      mode: newCatMode,
+    };
+    const updated = [...tagCategories, newCat];
+    setTagCategories(updated);
+    setNewCatName('');
+    setNewCatShortcut('');
+    notify(`Botón "${newCat.name}" añadido a la botonera`);
+  };
+
+  const handleDeleteCategory = (catId: string) => {
+    const updated = tagCategories.filter((c) => c.id !== catId);
+    setTagCategories(updated);
+    notify('Botón eliminado de la botonera');
+  };
+
+  const handleMoveCategory = (index: number, direction: 'up' | 'down') => {
+    const targetIdx = direction === 'up' ? index - 1 : index + 1;
+    if (targetIdx < 0 || targetIdx >= tagCategories.length) return;
+    const copy = [...tagCategories];
+    const [moved] = copy.splice(index, 1);
+    copy.splice(targetIdx, 0, moved);
+    setTagCategories(copy);
   };
 
   // Filtrado y Agrupación de Eventos según lo clasificado
@@ -2610,176 +2935,791 @@ ${xmlInstances}
       .filter((e): e is ClipEvent => Boolean(e));
   }, [activePlaylist, events]);
 
+  const renderNacsportBotonera = (isFs: boolean) => {
+    const colClass =
+      botoneraColumns === 2
+        ? 'grid-cols-2'
+        : botoneraColumns === 3
+        ? 'grid-cols-2 sm:grid-cols-3'
+        : botoneraColumns === 4
+        ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4'
+        : botoneraColumns === 6
+        ? 'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6'
+        : 'grid-cols-2 sm:grid-cols-3 md:grid-cols-5';
+
+    const btnPadding =
+      botoneraButtonSize === 'lg'
+        ? 'p-3.5 min-h-[72px]'
+        : botoneraButtonSize === 'sm'
+        ? 'p-1.5 min-h-[44px]'
+        : 'p-2.5 min-h-[58px]';
+
+    return (
+      <div className={`space-y-3 ${isFs ? 'text-white' : 'text-gray-900'}`}>
+        {/* FILA 1: EQUIPO, POSICIÓN/JUGADOR, ÉXITO/NEGATIVO, ZONA Y ACCESO A CONSTRUCTOR */}
+        <div
+          className={`p-2.5 rounded border flex flex-wrap items-center justify-between gap-2 ${
+            isFs ? 'bg-[#151922] border-gray-700' : 'bg-white border-gray-300'
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            {/* Selector de Equipo */}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => {
+                  setSelectedTeamFilter('Séneca CF');
+                  updateLastDirectTaggedClip({ team: 'Séneca CF' });
+                }}
+                className={`px-3 py-1 font-condensed font-bold uppercase rounded transition ${
+                  selectedTeamFilter === 'Séneca CF'
+                    ? 'bg-[#cc2016] text-white shadow'
+                    : isFs
+                    ? 'bg-gray-800 text-gray-300'
+                    : 'bg-gray-200 text-gray-700'
+                }`}
+              >
+                Séneca CF
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedTeamFilter('Rival');
+                  updateLastDirectTaggedClip({ team: 'Rival' });
+                }}
+                className={`px-3 py-1 font-condensed font-bold uppercase rounded transition ${
+                  selectedTeamFilter === 'Rival'
+                    ? 'bg-[#1666c0] text-white shadow'
+                    : isFs
+                    ? 'bg-gray-800 text-gray-300'
+                    : 'bg-gray-200 text-gray-700'
+                }`}
+              >
+                Rival ({rivalName})
+              </button>
+            </div>
+
+            {/* Selector de Jugador / Posición */}
+            <select
+              value={selectedPlayerTag}
+              onChange={(e) => {
+                setSelectedPlayerTag(e.target.value);
+                updateLastDirectTaggedClip({ player: e.target.value || undefined });
+              }}
+              className={`border rounded px-2.5 py-1 text-xs font-medium focus:outline-none focus:border-[#cc2016] ${
+                isFs ? 'bg-[#1c2230] border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'
+              }`}
+            >
+              <option value="">-- Sin marcar posición --</option>
+              {allAvailablePlayers.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+
+            {/* Botones de Resultado Éxito / Negativo */}
+            <button
+              type="button"
+              onClick={() => {
+                const next =
+                  getClipOutcome(activeDescriptors) === 'positivo'
+                    ? applyOutcomeToDescriptors(activeDescriptors, 'neutro')
+                    : applyOutcomeToDescriptors(activeDescriptors, 'positivo');
+                setActiveDescriptors(next);
+                updateLastDirectTaggedClip({ descriptors: next });
+              }}
+              className={`px-3 py-1 rounded font-condensed font-bold uppercase border transition flex items-center gap-1 ${
+                getClipOutcome(activeDescriptors) === 'positivo'
+                  ? 'bg-emerald-600 text-white border-emerald-700 ring-2 ring-emerald-400/50'
+                  : isFs
+                  ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800 hover:bg-emerald-900/40'
+                  : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+              }`}
+            >
+              <Check className="w-3.5 h-3.5 stroke-[3]" />
+              <span>✓ Éxito / Acierto</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                const next =
+                  getClipOutcome(activeDescriptors) === 'negativo'
+                    ? applyOutcomeToDescriptors(activeDescriptors, 'neutro')
+                    : applyOutcomeToDescriptors(activeDescriptors, 'negativo');
+                setActiveDescriptors(next);
+                updateLastDirectTaggedClip({ descriptors: next });
+              }}
+              className={`px-3 py-1 rounded font-condensed font-bold uppercase border transition flex items-center gap-1 ${
+                getClipOutcome(activeDescriptors) === 'negativo'
+                  ? 'bg-[#cc2016] text-white border-red-800 ring-2 ring-red-400/50'
+                  : isFs
+                  ? 'bg-red-950/40 text-red-400 border-red-800 hover:bg-red-900/40'
+                  : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
+              }`}
+            >
+              <X className="w-3.5 h-3.5 stroke-[3]" />
+              <span>✕ Negativo / Fallo</span>
+            </button>
+
+            {/* Selector de Zona */}
+            <select
+              value={selectedPitchZone}
+              onChange={(e) => {
+                setSelectedPitchZone(e.target.value);
+                updateLastDirectTaggedClip({ zone: e.target.value });
+              }}
+              className={`border rounded px-2.5 py-1 text-xs ${
+                isFs ? 'bg-[#1c2230] border-gray-700 text-white' : 'bg-white border-gray-300 text-gray-900'
+              }`}
+            >
+              {[
+                'Carril Izq. Defensivo',
+                'Zona Central Defensiva',
+                'Carril Der. Defensivo',
+                'Carril Izq. Medio',
+                'Zona Media Centro',
+                'Carril Der. Medio',
+                'Carril Izq. Ofensivo',
+                'Zona Central Ofensiva (Área)',
+                'Carril Der. Ofensivo',
+              ].map((z) => (
+                <option key={z} value={z}>
+                  {z}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Selector de plantilla y acciones de botonera */}
+          <div className="flex items-center gap-1.5 text-xs">
+            <select
+              value={activeTemplateId}
+              onChange={(e) => {
+                const t = botoneraTemplates.find((t) => t.id === e.target.value);
+                if (t) handleApplyTemplate(t);
+              }}
+              className={`border rounded px-2 py-1 text-xs font-semibold ${
+                isFs ? 'bg-[#1c2230] border-gray-700 text-[#f5b800]' : 'bg-gray-100 border-gray-300 text-gray-800'
+              }`}
+            >
+              {botoneraTemplates.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+
+            <button
+              onClick={() => setShowBotoneraBuilderModal(true)}
+              className="px-2.5 py-1 bg-[#141414] hover:bg-gray-800 text-[#f5b800] rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1"
+              title="Personalizar botones, colores, atajos y modos de la botonera"
+            >
+              <Sliders className="w-3 h-3" />
+              <span>Editar Botonera</span>
+            </button>
+
+            {!isFs && (
+              <button
+                onClick={() => enterBotoneraFullscreen()}
+                className="px-3 py-1 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1"
+                title="Ver esta botonera a pantalla completa"
+              >
+                <Maximize2 className="w-3 h-3" />
+                <span>Pantalla Completa</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* FILA 2: DESCRIPTORES TÁCTICOS EXTRA */}
+        {showDescriptorsInBotonera && (
+          <div className="flex flex-wrap items-center gap-1">
+            <span
+              className={`text-[11px] font-condensed font-bold uppercase mr-1 ${
+                isFs ? 'text-gray-400' : 'text-gray-500'
+              }`}
+            >
+              Descriptores:
+            </span>
+            {customDescriptors
+              .filter((d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo')
+              .map((desc) => {
+                const isOn = activeDescriptors.includes(desc);
+                return (
+                  <button
+                    key={desc}
+                    onClick={() => {
+                      const next = isOn ? activeDescriptors.filter((d) => d !== desc) : [...activeDescriptors, desc];
+                      setActiveDescriptors(next);
+                      updateLastDirectTaggedClip({ descriptors: next });
+                    }}
+                    className={`px-2 py-0.5 text-[11px] rounded border transition ${
+                      isOn
+                        ? 'bg-[#15181d] text-[#f5b800] border-[#f5b800] font-bold shadow-sm'
+                        : isFs
+                        ? 'bg-gray-800/80 text-gray-300 border-gray-700 hover:bg-gray-700'
+                        : 'bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200'
+                    }`}
+                  >
+                    {desc}
+                  </button>
+                );
+              })}
+            <button
+              onClick={() => {
+                setBuilderTab('descriptores');
+                setShowBotoneraBuilderModal(true);
+              }}
+              className="text-[11px] text-gray-400 hover:text-[#f5b800] px-1.5 py-0.5 underline"
+            >
+              + Añadir descriptor
+            </button>
+          </div>
+        )}
+
+        {/* FILA 3: CUADRÍCULA PRINCIPAL DE BOTONES DE CATEGORÍA NACSPORT */}
+        <div className={`grid ${colClass} gap-2`}>
+          {tagCategories.map((cat) => {
+            const isManualRecording = Boolean(activeManualRecordings[cat.id]);
+            const isManualMode = cat.mode === 'manual';
+            const catClipsCount = events.filter((e) => e.category === cat.name).length;
+
+            return (
+              <div
+                key={cat.id}
+                className={`relative rounded-md overflow-hidden transition-all duration-150 flex flex-col justify-between shadow ${btnPadding} ${
+                  isManualRecording
+                    ? 'ring-4 ring-red-500 ring-offset-2 ring-offset-black animate-pulse'
+                    : 'hover:scale-[1.01] hover:shadow-lg'
+                }`}
+                style={{
+                  backgroundColor: cat.color || '#cc2016',
+                  color: '#ffffff',
+                }}
+              >
+                {/* Header del botón: Tipo, Modo, y Atajo de teclado */}
+                <div className="flex items-start justify-between gap-1 mb-1">
+                  <span className="text-[9.5px] uppercase font-condensed tracking-wider px-1.5 py-0.2 rounded bg-black/35 text-white/90">
+                    {cat.type}
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {isManualRecording ? (
+                      <span className="bg-white text-red-700 text-[10px] font-bold px-1.5 py-0.2 rounded font-mono animate-bounce">
+                        ● REC
+                      </span>
+                    ) : isManualMode ? (
+                      <span className="text-[9px] bg-black/40 text-amber-300 font-bold px-1 py-0.2 rounded">
+                        REC Manual
+                      </span>
+                    ) : (
+                      <span className="text-[9px] bg-black/30 text-white/80 font-mono px-1 py-0.2 rounded">
+                        -{cat.preRoll}s/+{cat.postRoll}s
+                      </span>
+                    )}
+                    {cat.shortcut && (
+                      <span className="bg-black/50 text-[#f5b800] text-[10px] font-mono font-bold px-1.5 py-0.2 rounded shadow-inner">
+                        [{cat.shortcut}]
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Centro: Nombre del Botón Nacsport */}
+                <button
+                  type="button"
+                  onClick={() => handleQuickCategoryTag(cat)}
+                  className="w-full text-left font-condensed font-extrabold uppercase text-sm sm:text-base leading-tight tracking-wide drop-shadow-sm flex-1 flex items-center my-0.5"
+                >
+                  {cat.name}
+                </button>
+
+                {/* Pie del botón: Contador de cortes y botón auxiliar manual */}
+                <div className="flex items-center justify-between pt-1 border-t border-white/20 mt-1 text-[10px]">
+                  <span className="font-mono text-white/90">
+                    Cortes: <strong className="text-[#f5b800] font-bold">{catClipsCount}</strong>
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {isManualRecording ? (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleQuickCategoryTag(cat, 'manual');
+                        }}
+                        className="bg-black/70 hover:bg-black text-amber-300 px-2 py-0.5 rounded font-condensed font-bold uppercase text-[10px]"
+                      >
+                        Cerrar corte
+                      </button>
+                    ) : (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleQuickCategoryTag(cat, isManualMode ? 'auto' : 'manual');
+                        }}
+                        className="bg-black/30 hover:bg-black/60 text-white/90 px-1.5 py-0.5 rounded text-[9.5px]"
+                        title={isManualMode ? 'Corte automático de 5s' : 'Iniciar grabación manual'}
+                      >
+                        {isManualMode ? 'Cortar auto' : '● REC Manual'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* FILA 4 (OPCIONAL): DORSALES / JUGADORES + CAMPO DE 9 ZONAS */}
+        {(showPlayersInBotonera || showPitchInBotonera) && (
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 pt-2 border-t border-gray-700/40">
+            {showPitchInBotonera && (
+              <div className="md:col-span-5 flex flex-col">
+                <span
+                  className={`text-xs font-condensed font-bold uppercase mb-1 flex items-center gap-1 ${
+                    isFs ? 'text-gray-300' : 'text-gray-700'
+                  }`}
+                >
+                  <MapPin className="w-3.5 h-3.5 text-[#cc2016]" />
+                  Zona táctica: <strong className="text-[#f5b800]">{selectedPitchZone}</strong>
+                </span>
+                <div className="relative w-full h-[150px] bg-[#1a472a] rounded border border-gray-600 p-1.5 grid grid-cols-3 grid-rows-3 gap-1 shadow-inner">
+                  {[
+                    'Carril Izq. Defensivo',
+                    'Carril Izq. Medio',
+                    'Carril Izq. Ofensivo',
+                    'Zona Central Defensiva',
+                    'Zona Media Centro',
+                    'Zona Central Ofensiva (Área)',
+                    'Carril Der. Defensivo',
+                    'Carril Der. Medio',
+                    'Carril Der. Ofensivo',
+                  ].map((zone) => (
+                    <button
+                      key={zone}
+                      onClick={() => {
+                        setSelectedPitchZone(zone);
+                        updateLastDirectTaggedClip({ zone });
+                      }}
+                      className={`border rounded flex items-center justify-center p-0.5 text-center transition ${
+                        selectedPitchZone === zone
+                          ? 'bg-[#cc2016] text-white font-bold ring-2 ring-[#f5b800]'
+                          : 'bg-black/25 hover:bg-white/20 text-white/90 text-[10px]'
+                      }`}
+                    >
+                      <span className="text-[10px] leading-tight line-clamp-1">{zone}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {showPlayersInBotonera && (
+              <div className={`${showPitchInBotonera ? 'md:col-span-7' : 'md:col-span-12'} flex flex-col`}>
+                <span
+                  className={`text-xs font-condensed font-bold uppercase mb-1 flex items-center gap-1 ${
+                    isFs ? 'text-gray-300' : 'text-gray-700'
+                  }`}
+                >
+                  <Users className="w-3.5 h-3.5 text-[#cc2016]" />
+                  Plantilla / Dorsales rápidos:
+                </span>
+                <div className="flex flex-wrap gap-1 max-h-[150px] overflow-y-auto p-1 bg-black/20 rounded border border-gray-700/50">
+                  <button
+                    onClick={() => {
+                      setSelectedPlayerTag('');
+                      updateLastDirectTaggedClip({ player: undefined });
+                    }}
+                    className={`px-2 py-1 text-xs rounded border transition ${
+                      selectedPlayerTag === ''
+                        ? 'bg-[#cc2016] text-white font-bold'
+                        : isFs
+                        ? 'bg-gray-800 text-gray-300 border-gray-700'
+                        : 'bg-gray-100 text-gray-800 border-gray-300'
+                    }`}
+                  >
+                    Sin posición
+                  </button>
+                  {allAvailablePlayers.map((player) => (
+                    <button
+                      key={player}
+                      onClick={() => {
+                        const target = selectedPlayerTag === player ? '' : player;
+                        setSelectedPlayerTag(target);
+                        updateLastDirectTaggedClip({ player: target || undefined });
+                      }}
+                      className={`px-2 py-1 text-xs rounded border transition ${
+                        selectedPlayerTag === player
+                          ? 'bg-[#cc2016] text-white font-bold ring-2 ring-[#f5b800]'
+                          : isFs
+                          ? 'bg-gray-800 text-gray-300 border-gray-700 hover:bg-gray-700'
+                          : 'bg-gray-100 text-gray-800 border-gray-300 hover:bg-gray-200'
+                      }`}
+                    >
+                      {player}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="min-h-screen flex flex-col bg-[#f4f4f4] text-[#1a1a1a] select-none">
+    <div
+      className={`min-h-screen flex flex-col select-none transition-colors duration-150 ${
+        isBotoneraFullscreen
+          ? 'fixed inset-0 z-40 bg-[#0b0d13] text-white w-screen h-screen overflow-hidden'
+          : 'bg-[#f4f4f4] text-[#1a1a1a]'
+      }`}
+    >
       {/* =====================================================================
-          BARRA SUPERIOR PRINCIPAL (Sin cursos, con Escudo y ANÁLISIS SÉNECA CF)
+          BARRA SUPERIOR: PANTALLA COMPLETA O BARRA ESTÁNDAR
          ===================================================================== */}
-      <header className="h-[52px] bg-[#161616] text-white flex items-center justify-between px-3 border-b border-[#2b2b2b] shrink-0">
-        <div className="flex items-center h-full">
-          <div className="flex items-center gap-2.5 pr-4 border-r border-[#333] h-[36px]">
+      {isBotoneraFullscreen ? (
+        <header className="h-[52px] bg-[#141720] text-white flex items-center justify-between px-3 border-b border-[#252936] shrink-0">
+          <div className="flex items-center gap-3">
             <img
               src="/seneca-shield.jpg"
-              alt="Escudo Séneca CF"
-              className="h-9 w-9 object-contain rounded-sm bg-white p-0.5 shadow-sm"
+              alt="Séneca CF"
+              className="h-8 w-8 object-contain rounded-sm bg-white p-0.5 shadow-sm"
             />
             <div className="flex flex-col leading-none">
               <div className="flex items-center gap-1.5">
-                <span className="font-condensed font-extrabold tracking-wider text-[17px] text-[#f5b800]">
-                  ANÁLISIS SÉNECA CF
+                <span className="font-condensed font-extrabold tracking-wider text-[16px] text-[#f5b800]">
+                  BOTONERA NACSPORT · PANTALLA COMPLETA
+                </span>
+                <span className="px-1.5 py-0.2 bg-[#cc2016] text-white text-[10px] font-condensed font-bold uppercase rounded">
+                  {directOneClickMode ? '⚡ 1-Clic Directo' : '📝 Ventana'}
                 </span>
               </div>
-              <span className="font-condensed text-[11px] tracking-[0.16em] text-gray-300 uppercase">
-                DEPARTAMENTO DE VIDEOANÁLISIS
+              <span className="font-condensed text-[10px] tracking-[0.14em] text-gray-400 uppercase">
+                {projectName} · {rivalName}
               </span>
             </div>
           </div>
 
-          <nav className="flex items-center h-full ml-3 gap-1">
-            <button
-              onClick={() => setActiveTab('editor')}
-              className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
-                activeTab === 'editor'
-                  ? 'bg-white text-[#141414] border-[#cc2016]'
-                  : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
-              }`}
-            >
-              EDITOR BÁSICO
-            </button>
-            <button
-              onClick={() => setActiveTab('con_video')}
-              className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
-                activeTab === 'con_video'
-                  ? 'bg-white text-[#141414] border-[#cc2016]'
-                  : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
-              }`}
-            >
-              REGISTRO CON VÍDEO
-            </button>
-            <button
-              onClick={() => setActiveTab('sin_video')}
-              className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
-                activeTab === 'sin_video'
-                  ? 'bg-white text-[#141414] border-[#cc2016]'
-                  : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
-              }`}
-            >
-              REGISTRO SIN VÍDEO
-            </button>
-          </nav>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {statusMessage && (
-            <div className="hidden xl:flex items-center gap-1.5 bg-[#262626] border border-[#f5b800]/50 text-[#f5b800] px-2.5 py-1 rounded text-xs font-medium">
-              <Check className="w-3.5 h-3.5" />
-              <span>{statusMessage}</span>
+          {/* CENTRO: CRONO / CONTROLES DE VÍDEO */}
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 bg-[#1b202c] px-3 py-1 rounded border border-gray-700">
+              <Clock className="w-4 h-4 text-[#f5b800]" />
+              <span className="font-mono font-bold text-sm text-[#f5b800]">
+                {formatTimecode(activeTime)}
+              </span>
+              {activeMatchPeriodInfo && (
+                <span className="text-[11px] font-condensed font-bold uppercase text-white bg-[#cc2016] px-1.5 py-0.2 rounded">
+                  {activeMatchPeriodInfo.periodLabel}
+                </span>
+              )}
             </div>
-          )}
 
-          {/* Botón Matriz de Datos Cruzados estilo Nacsport */}
-          <button
-            onClick={() => setShowMatrixModal(true)}
-            className="h-[32px] px-2.5 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm"
-            title="Abrir Matriz de Datos y Cruce de Categorías estilo Nacsport"
-          >
-            <Grid className="w-3.5 h-3.5" />
-            <span>Matriz Nacsport</span>
-          </button>
-
-          <button
-            onClick={() => {
-              fetchProjectsFromSupabase();
-              setShowProjectsModal(true);
-            }}
-            className="h-[32px] px-2.5 bg-[#242424] hover:bg-[#323232] border border-[#3d3d3d] rounded text-xs flex items-center gap-1.5 text-gray-200 transition"
-            title="Gestionar partidos y sincronización con Supabase"
-          >
-            {supabaseStatus === 'synced' ? (
-              <Cloud className="w-3.5 h-3.5 text-emerald-400" />
-            ) : supabaseStatus === 'syncing' ? (
-              <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
-            ) : (
-              <CloudOff className="w-3.5 h-3.5 text-amber-400" />
+            {activeVideo && (
+              <div className="flex items-center gap-1 bg-[#1b202c] px-2 py-1 rounded border border-gray-700">
+                <button
+                  onClick={togglePlay}
+                  className="px-2.5 py-0.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase rounded flex items-center gap-1"
+                >
+                  {isPlaying ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3 fill-current" />}
+                  <span>{isPlaying ? 'PAUSA' : 'PLAY'}</span>
+                </button>
+                <button
+                  onClick={() => skipSeconds(-5)}
+                  className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-[11px] font-semibold rounded text-white"
+                >
+                  -5s
+                </button>
+                <button
+                  onClick={() => skipSeconds(5)}
+                  className="px-2 py-0.5 bg-gray-700 hover:bg-gray-600 text-[11px] font-semibold rounded text-white"
+                >
+                  +5s
+                </button>
+              </div>
             )}
-            <span className="font-medium truncate max-w-[150px]">{projectName}</span>
-            <FolderOpen className="w-3.5 h-3.5 text-gray-400 ml-0.5" />
-          </button>
 
-          {supabaseStatus === 'local_only' && (
-            <button
-              onClick={() => setShowSqlModal(true)}
-              className="h-[32px] px-2 bg-[#cc2016]/20 hover:bg-[#cc2016]/40 border border-[#cc2016] text-[#f5b800] rounded text-[11px] font-semibold flex items-center gap-1"
-            >
-              <span>SQL Supabase</span>
-            </button>
-          )}
-
-          <button
-            onClick={handleUndo}
-            className="w-[32px] h-[32px] flex items-center justify-center border border-[#444] bg-[#222] hover:bg-[#333] text-gray-200"
-            title="Deshacer"
-          >
-            <Undo2 className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleRedo}
-            className="w-[32px] h-[32px] flex items-center justify-center border border-[#444] bg-[#222] hover:bg-[#333] text-gray-200"
-            title="Rehacer"
-          >
-            <Redo2 className="w-4 h-4" />
-          </button>
-        </div>
-      </header>
-
-      {/* =====================================================================
-          SEGUNDA BARRA (VERSIÓN GRATUITA, Limpiar proyecto, INSTALAR APP)
-         ===================================================================== */}
-      <div className="h-[46px] bg-[#1e1e1e] text-white flex items-center justify-between px-3 border-b-2 border-[#cc2016] shrink-0">
-        <div className="flex items-center gap-2">
-          <div className="px-4 py-1.5 border border-[#cc2016] bg-[#141414] font-condensed font-bold text-[14px] tracking-wider uppercase text-white flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-[#f5b800]"></span>
-            VERSIÓN GRATUITA
+            {activeTab === 'sin_video' && (
+              <div className="flex items-center gap-1 bg-[#1b202c] px-2 py-1 rounded border border-gray-700">
+                <button
+                  onClick={() => {
+                    if (!liveTimerRunning && markers.firstHalfStart === undefined) {
+                      setMarkers((prev) => ({ ...prev, firstHalfStart: Number(liveTimerSeconds.toFixed(1)) }));
+                    }
+                    setLiveTimerRunning((r) => !r);
+                  }}
+                  className={`px-2.5 py-0.5 font-condensed font-bold text-xs uppercase rounded ${
+                    liveTimerRunning ? 'bg-amber-600' : 'bg-[#cc2016]'
+                  }`}
+                >
+                  {liveTimerRunning ? 'PAUSAR' : 'INICIAR'}
+                </button>
+                <select
+                  value={liveHalf}
+                  onChange={(e) => setLiveHalf(e.target.value as any)}
+                  className="bg-[#242b3b] text-[11px] font-bold px-1.5 py-0.5 rounded border border-gray-700 text-white"
+                >
+                  <option value="1ª Parte">1ª Parte</option>
+                  <option value="2ª Parte">2ª Parte</option>
+                </select>
+              </div>
+            )}
           </div>
-          {playingQueue && (
-            <div className="flex items-center gap-2 bg-[#cc2016] text-white px-3 py-1 text-xs font-bold rounded animate-pulse">
-              <ListVideo className="w-3.5 h-3.5" />
-              <span>
-                Reproduciendo Grupo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
-                {playingQueue[playingQueueIndex]?.name}
-              </span>
+
+          {/* DERECHA: CONMUTADOR DE DISPOSICIÓN, CREAR BOTONERA Y SALIR */}
+          <div className="flex items-center gap-1.5">
+            {activeVideo && (
+              <div className="flex items-center bg-[#1b202c] p-0.5 rounded border border-gray-700">
+                <button
+                  onClick={() => setBotoneraFullscreenLayout('split_video')}
+                  className={`px-2.5 py-1 text-xs font-condensed font-bold uppercase rounded flex items-center gap-1 transition ${
+                    botoneraFullscreenLayout === 'split_video'
+                      ? 'bg-[#cc2016] text-white shadow'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <Tv className="w-3.5 h-3.5" />
+                  <span>Vídeo + Botonera</span>
+                </button>
+                <button
+                  onClick={() => setBotoneraFullscreenLayout('board_only')}
+                  className={`px-2.5 py-1 text-xs font-condensed font-bold uppercase rounded flex items-center gap-1 transition ${
+                    botoneraFullscreenLayout === 'board_only'
+                      ? 'bg-[#cc2016] text-white shadow'
+                      : 'text-gray-400 hover:text-white'
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  <span>Solo Botonera 100%</span>
+                </button>
+              </div>
+            )}
+
+            <button
+              onClick={() => setDirectOneClickMode((prev) => !prev)}
+              className={`px-2.5 py-1 text-xs font-condensed font-bold uppercase rounded border transition flex items-center gap-1 ${
+                directOneClickMode
+                  ? 'bg-emerald-600/20 text-emerald-300 border-emerald-500'
+                  : 'bg-amber-600/20 text-amber-300 border-amber-500'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              <span>{directOneClickMode ? '⚡ 1-Clic Directo' : '📝 Ventana'}</span>
+            </button>
+
+            <button
+              onClick={() => setShowBotoneraBuilderModal(true)}
+              className="px-2.5 py-1 bg-[#1f2430] hover:bg-[#2b3242] border border-gray-700 text-[#f5b800] text-xs font-condensed font-bold uppercase rounded flex items-center gap-1"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Crear / Editar</span>
+            </button>
+
+            <button
+              onClick={exitBotoneraFullscreen}
+              className="px-3 py-1 bg-red-950/60 hover:bg-red-800 border border-red-700 text-white font-condensed font-bold text-xs uppercase rounded flex items-center gap-1 transition"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              <span>Salir [ESC]</span>
+            </button>
+          </div>
+        </header>
+      ) : (
+        <>
+          <header className="h-[52px] bg-[#161616] text-white flex items-center justify-between px-3 border-b border-[#2b2b2b] shrink-0">
+            <div className="flex items-center h-full">
+              <div className="flex items-center gap-2.5 pr-4 border-r border-[#333] h-[36px]">
+                <img
+                  src="/seneca-shield.jpg"
+                  alt="Escudo Séneca CF"
+                  className="h-9 w-9 object-contain rounded-sm bg-white p-0.5 shadow-sm"
+                />
+                <div className="flex flex-col leading-none">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-condensed font-extrabold tracking-wider text-[17px] text-[#f5b800]">
+                      ANÁLISIS SÉNECA CF
+                    </span>
+                  </div>
+                  <span className="font-condensed text-[11px] tracking-[0.16em] text-gray-300 uppercase">
+                    DEPARTAMENTO DE VIDEOANÁLISIS
+                  </span>
+                </div>
+              </div>
+
+              <nav className="flex items-center h-full ml-3 gap-1">
+                <button
+                  onClick={() => setActiveTab('editor')}
+                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
+                    activeTab === 'editor'
+                      ? 'bg-white text-[#141414] border-[#cc2016]'
+                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
+                  }`}
+                >
+                  EDITOR BÁSICO
+                </button>
+                <button
+                  onClick={() => setActiveTab('con_video')}
+                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
+                    activeTab === 'con_video'
+                      ? 'bg-white text-[#141414] border-[#cc2016]'
+                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
+                  }`}
+                >
+                  REGISTRO CON VÍDEO
+                </button>
+                <button
+                  onClick={() => setActiveTab('sin_video')}
+                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
+                    activeTab === 'sin_video'
+                      ? 'bg-white text-[#141414] border-[#cc2016]'
+                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
+                  }`}
+                >
+                  REGISTRO SIN VÍDEO
+                </button>
+              </nav>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {statusMessage && (
+                <div className="hidden xl:flex items-center gap-1.5 bg-[#262626] border border-[#f5b800]/50 text-[#f5b800] px-2.5 py-1 rounded text-xs font-medium">
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{statusMessage}</span>
+                </div>
+              )}
+
+              {/* Botón Abrir Botonera a Pantalla Completa */}
               <button
-                onClick={() => setPlayingQueue(null)}
-                className="ml-1 underline text-[11px] hover:text-amber-200"
+                onClick={() => enterBotoneraFullscreen()}
+                className="h-[32px] px-3 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm animate-pulse hover:animate-none"
+                title="Abrir la Botonera Nacsport en Pantalla Completa (o pulsa tecla F)"
               >
-                Detener cola
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span>Botonera Pantalla Completa</span>
+              </button>
+
+              {/* Botón Crear / Personalizar Botonera */}
+              <button
+                onClick={() => setShowBotoneraBuilderModal(true)}
+                className="h-[32px] px-2.5 bg-[#252830] hover:bg-[#343842] border border-gray-700 text-[#f5b800] hover:text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm"
+                title="Crear y Personalizar Botonera como en Nacsport"
+              >
+                <Sliders className="w-3.5 h-3.5" />
+                <span>Crear Botonera</span>
+              </button>
+
+              {/* Botón Matriz de Datos Cruzados estilo Nacsport */}
+              <button
+                onClick={() => setShowMatrixModal(true)}
+                className="h-[32px] px-2.5 bg-[#cc2016] hover:bg-[#a81810] text-white rounded text-xs font-condensed font-bold uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm"
+                title="Abrir Matriz de Datos y Cruce de Categorías estilo Nacsport"
+              >
+                <Grid className="w-3.5 h-3.5" />
+                <span>Matriz Nacsport</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  fetchProjectsFromSupabase();
+                  setShowProjectsModal(true);
+                }}
+                className="h-[32px] px-2.5 bg-[#242424] hover:bg-[#323232] border border-[#3d3d3d] rounded text-xs flex items-center gap-1.5 text-gray-200 transition"
+                title="Gestionar partidos y sincronización con Supabase"
+              >
+                {supabaseStatus === 'synced' ? (
+                  <Cloud className="w-3.5 h-3.5 text-emerald-400" />
+                ) : supabaseStatus === 'syncing' ? (
+                  <RefreshCw className="w-3.5 h-3.5 text-amber-400 animate-spin" />
+                ) : (
+                  <CloudOff className="w-3.5 h-3.5 text-amber-400" />
+                )}
+                <span className="font-medium truncate max-w-[150px]">{projectName}</span>
+                <FolderOpen className="w-3.5 h-3.5 text-gray-400 ml-0.5" />
+              </button>
+
+              {supabaseStatus === 'local_only' && (
+                <button
+                  onClick={() => setShowSqlModal(true)}
+                  className="h-[32px] px-2 bg-[#cc2016]/20 hover:bg-[#cc2016]/40 border border-[#cc2016] text-[#f5b800] rounded text-[11px] font-semibold flex items-center gap-1"
+                >
+                  <span>SQL Supabase</span>
+                </button>
+              )}
+
+              <button
+                onClick={handleUndo}
+                className="w-[32px] h-[32px] flex items-center justify-center border border-[#444] bg-[#222] hover:bg-[#333] text-gray-200"
+                title="Deshacer"
+              >
+                <Undo2 className="w-4 h-4" />
+              </button>
+              <button
+                onClick={handleRedo}
+                className="w-[32px] h-[32px] flex items-center justify-center border border-[#444] bg-[#222] hover:bg-[#333] text-gray-200"
+                title="Rehacer"
+              >
+                <Redo2 className="w-4 h-4" />
               </button>
             </div>
-          )}
-        </div>
+          </header>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleClearProject}
-            className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-semibold transition"
-          >
-            Limpiar proyecto
-          </button>
-          <button
-            onClick={handleInstallApp}
-            className="px-3.5 py-1.5 bg-transparent hover:bg-[#2d2d2d] border border-gray-500 text-white font-condensed font-bold text-xs tracking-wider uppercase transition"
-          >
-            INSTALAR APP
-          </button>
-        </div>
-      </div>
+          {/* =====================================================================
+              SEGUNDA BARRA (VERSIÓN GRATUITA, Limpiar proyecto, INSTALAR APP)
+             ===================================================================== */}
+          <div className="h-[46px] bg-[#1e1e1e] text-white flex items-center justify-between px-3 border-b-2 border-[#cc2016] shrink-0">
+            <div className="flex items-center gap-2">
+              <div className="px-4 py-1.5 border border-[#cc2016] bg-[#141414] font-condensed font-bold text-[14px] tracking-wider uppercase text-white flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-[#f5b800]"></span>
+                VERSIÓN GRATUITA
+              </div>
+              {playingQueue && (
+                <div className="flex items-center gap-2 bg-[#cc2016] text-white px-3 py-1 text-xs font-bold rounded animate-pulse">
+                  <ListVideo className="w-3.5 h-3.5" />
+                  <span>
+                    Reproduciendo Grupo ({playingQueueIndex + 1}/{playingQueue.length}):{' '}
+                    {playingQueue[playingQueueIndex]?.name}
+                  </span>
+                  <button
+                    onClick={() => setPlayingQueue(null)}
+                    className="ml-1 underline text-[11px] hover:text-amber-200"
+                  >
+                    Detener cola
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleClearProject}
+                className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-semibold transition"
+              >
+                Limpiar proyecto
+              </button>
+              <button
+                onClick={handleInstallApp}
+                className="px-3.5 py-1.5 bg-transparent hover:bg-[#2d2d2d] border border-gray-500 text-white font-condensed font-bold text-xs tracking-wider uppercase transition"
+              >
+                INSTALAR APP
+              </button>
+            </div>
+          </div>
+        </>
+      )}
 
       {/* =====================================================================
           CUERPO PRINCIPAL DE LA APLICACIÓN
          ===================================================================== */}
-      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
-        {/* COLUMNA IZQUIERDA: Visor de Vídeo + Línea de tiempo completa + Controles A/B */}
-        <div className="flex-1 flex flex-col bg-[#f4f4f4] overflow-y-auto border-r border-gray-300">
+      <div className={`flex-1 flex overflow-hidden ${isBotoneraFullscreen ? 'flex-col' : 'flex-col lg:flex-row'}`}>
+        {/* COLUMNA IZQUIERDA / VISTA PRINCIPAL: Visor de Vídeo + Botonera + Línea de tiempo */}
+        <div
+          className={`flex-1 flex ${
+            isBotoneraFullscreen
+              ? botoneraFullscreenLayout === 'split_video'
+                ? 'flex-col lg:flex-row min-h-0 bg-[#090b10] overflow-hidden'
+                : 'flex-col min-h-0 bg-[#090b10] overflow-y-auto'
+              : 'flex-col bg-[#f4f4f4] overflow-y-auto border-r border-gray-300'
+          }`}
+        >
           {activeTab !== 'sin_video' ? (
             <>
               {/* Contenedor Negro del Reproductor de Vídeo */}
@@ -2795,8 +3735,14 @@ ${xmlInstances}
                   setIsDraggingOver(false);
                   handleFilesSelected(e.dataTransfer.files);
                 }}
-                className={`relative w-full bg-black flex flex-col justify-between overflow-hidden ${
-                  activeTab === 'con_video' ? 'h-[420px]' : 'h-[490px]'
+                className={`relative bg-black flex flex-col justify-between overflow-hidden ${
+                  isBotoneraFullscreen
+                    ? botoneraFullscreenLayout === 'board_only'
+                      ? 'hidden'
+                      : 'w-full lg:w-1/2 h-[340px] lg:h-full shrink-0 border-r border-gray-800'
+                    : activeTab === 'con_video'
+                    ? 'w-full h-[420px]'
+                    : 'w-full h-[490px]'
                 } ${isDraggingOver ? 'ring-4 ring-[#cc2016]' : ''}`}
               >
                 <input
@@ -3302,166 +4248,29 @@ ${xmlInstances}
                 </div>
               </div>
 
-              {/* Botonera Nacsport en "REGISTRO CON VÍDEO" (Categorías + Descriptores + Jugador + Zona) */}
-              {activeTab === 'con_video' && (
-                <div className="bg-white border-b border-gray-300 px-3 py-2.5 space-y-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="w-2.5 h-2.5 bg-[#cc2016] inline-block"></span>
-                      <span className="font-condensed font-bold text-sm uppercase tracking-wider">
-                        PANEL DE CODIFICACIÓN NACSPORT (POSICIÓN + ÉXITO / NEGATIVO + CATEGORÍAS)
-                      </span>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                      <button
-                        onClick={() => setSelectedTeamFilter('Séneca CF')}
-                        className={`px-2.5 py-1 font-bold rounded ${
-                          selectedTeamFilter === 'Séneca CF'
-                            ? 'bg-[#cc2016] text-white'
-                            : 'bg-gray-200 text-gray-700'
-                        }`}
-                      >
-                        Séneca CF
-                      </button>
-                      <button
-                        onClick={() => setSelectedTeamFilter('Rival')}
-                        className={`px-2.5 py-1 font-bold rounded ${
-                          selectedTeamFilter === 'Rival'
-                            ? 'bg-[#1666c0] text-white'
-                            : 'bg-gray-200 text-gray-700'
-                        }`}
-                      >
-                        Rival ({rivalName})
-                      </button>
-                      <select
-                        value={selectedPlayerTag}
-                        onChange={(e) => setSelectedPlayerTag(e.target.value)}
-                        className="border border-gray-300 rounded px-2 py-1 bg-white text-xs font-medium"
-                      >
-                        <option value="">-- Sin marcar posición --</option>
-                        {allAvailablePlayers.map((p) => (
-                          <option key={p} value={p}>
-                            {p}
-                          </option>
-                        ))}
-                      </select>
+              {/* VISTA BOTONERA PANTALLA COMPLETA (SPLIT VIDEO O GIANT BOARD) */}
+              {isBotoneraFullscreen && (
+                <div
+                  className={`flex-1 overflow-y-auto ${
+                    botoneraFullscreenLayout === 'split_video'
+                      ? 'w-full lg:w-1/2 h-full p-3 sm:p-4 bg-[#0d1017]'
+                      : 'w-full h-full p-4 sm:p-6 bg-[#090b10]'
+                  }`}
+                >
+                  {renderNacsportBotonera(true)}
+                </div>
+              )}
 
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveDescriptors((prev) =>
-                            getClipOutcome(prev) === 'positivo'
-                              ? applyOutcomeToDescriptors(prev, 'neutro')
-                              : applyOutcomeToDescriptors(prev, 'positivo')
-                          )
-                        }
-                        className={`px-2.5 py-1 rounded font-condensed font-bold uppercase border transition ${
-                          getClipOutcome(activeDescriptors) === 'positivo'
-                            ? 'bg-emerald-600 text-white border-emerald-700'
-                            : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
-                        }`}
-                      >
-                        ✓ Con Éxito / Acierto
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveDescriptors((prev) =>
-                            getClipOutcome(prev) === 'negativo'
-                              ? applyOutcomeToDescriptors(prev, 'neutro')
-                              : applyOutcomeToDescriptors(prev, 'negativo')
-                          )
-                        }
-                        className={`px-2.5 py-1 rounded font-condensed font-bold uppercase border transition ${
-                          getClipOutcome(activeDescriptors) === 'negativo'
-                            ? 'bg-[#cc2016] text-white border-red-800'
-                            : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
-                        }`}
-                      >
-                        ✕ Negativo / No Acertada
-                      </button>
-
-                      <select
-                        value={selectedPitchZone}
-                        onChange={(e) => setSelectedPitchZone(e.target.value)}
-                        className="border border-gray-300 rounded px-2 py-1 bg-white text-xs"
-                      >
-                        {[
-                          'Carril Izq. Defensivo',
-                          'Zona Central Defensiva',
-                          'Carril Der. Defensivo',
-                          'Carril Izq. Medio',
-                          'Zona Media Centro',
-                          'Carril Der. Medio',
-                          'Carril Izq. Ofensivo',
-                          'Zona Central Ofensiva (Área)',
-                          'Carril Der. Ofensivo',
-                        ].map((z) => (
-                          <option key={z} value={z}>
-                            {z}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-
-                  {/* Descriptores secundarios seleccionables estilo Nacsport */}
-                  <div className="flex flex-wrap items-center gap-1">
-                    <span className="text-[11px] font-condensed font-bold uppercase text-gray-500 mr-1">
-                      Descriptores extra:
-                    </span>
-                    {NACSPORT_DESCRIPTORS.filter(
-                      (d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo'
-                    ).map((desc) => {
-                      const isOn = activeDescriptors.includes(desc);
-                      return (
-                        <button
-                          key={desc}
-                          onClick={() =>
-                            setActiveDescriptors((prev) =>
-                              prev.includes(desc) ? prev.filter((d) => d !== desc) : [...prev, desc]
-                            )
-                          }
-                          className={`px-2 py-0.5 text-[11px] rounded-sm border transition ${
-                            isOn
-                              ? 'bg-[#15181d] text-[#f5b800] border-[#15181d] font-semibold'
-                              : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-gray-200'
-                          }`}
-                        >
-                          {desc}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-                    {tagCategories.map((cat) => (
-                      <button
-                        key={cat.id}
-                        onClick={() => handleQuickCategoryTag(cat)}
-                        style={{ borderLeftColor: cat.color }}
-                        className="border-l-4 bg-[#f8f8f8] hover:bg-gray-200 border border-gray-300 px-2.5 py-1.5 text-left transition flex items-center justify-between group"
-                      >
-                        <div>
-                          <div className="font-condensed font-bold text-xs uppercase text-gray-900 group-hover:text-black">
-                            {cat.name}
-                          </div>
-                          <div className="text-[10px] text-gray-500">
-                            -{cat.preRoll}s / +{cat.postRoll}s
-                          </div>
-                        </div>
-                        <span className="text-[10px] font-mono bg-gray-200 px-1.5 py-0.5 rounded text-gray-700">
-                          [{cat.shortcut}]
-                        </span>
-                      </button>
-                    ))}
-                  </div>
+              {/* Botonera Nacsport en "REGISTRO CON VÍDEO" (modo estándar no fullscreen) */}
+              {activeTab === 'con_video' && !isBotoneraFullscreen && (
+                <div className="bg-white border-b border-gray-300 px-3 py-2.5">
+                  {renderNacsportBotonera(false)}
                 </div>
               )}
             </>
           ) : (
             /* ================= MODO REGISTRO SIN VÍDEO ================= */
-            <div className="p-4 bg-white border-b border-gray-300">
+            <div className={`p-4 border-b border-gray-300 ${isBotoneraFullscreen ? 'bg-[#090b10] flex-1 overflow-y-auto' : 'bg-white'}`}>
               <div className="flex flex-wrap items-center justify-between gap-3 bg-[#181818] text-white p-3 rounded mb-4 border-l-4 border-[#cc2016]">
                 <div className="flex items-center gap-3">
                   <Clock className="w-6 h-6 text-[#f5b800]" />
@@ -3518,191 +4327,15 @@ ${xmlInstances}
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-                <div className="xl:col-span-5 flex flex-col">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="font-condensed font-bold text-sm uppercase flex items-center gap-1.5">
-                      <MapPin className="w-4 h-4 text-[#cc2016]" />
-                      1. Zona del Campo seleccionada: <strong className="text-[#cc2016]">{selectedPitchZone}</strong>
-                    </span>
-                  </div>
-                  <div className="relative w-full h-[230px] bg-[#1b5e20] rounded border-2 border-gray-800 p-2 grid grid-cols-3 grid-rows-3 gap-1 shadow-inner">
-                    {[
-                      'Carril Izq. Defensivo',
-                      'Carril Izq. Medio',
-                      'Carril Izq. Ofensivo',
-                      'Zona Central Defensiva',
-                      'Zona Media Centro',
-                      'Zona Central Ofensiva (Área)',
-                      'Carril Der. Defensivo',
-                      'Carril Der. Medio',
-                      'Carril Der. Ofensivo',
-                    ].map((zone) => (
-                      <button
-                        key={zone}
-                        onClick={() => setSelectedPitchZone(zone)}
-                        className={`border border-white/40 rounded flex flex-col items-center justify-center p-1 text-center transition ${
-                          selectedPitchZone === zone
-                            ? 'bg-[#cc2016]/85 text-white font-bold ring-2 ring-[#f5b800]'
-                            : 'bg-black/15 hover:bg-white/15 text-white/90 text-xs'
-                        }`}
-                      >
-                        <span className="text-[11px] leading-tight">{zone}</span>
-                        <span className="text-[10px] text-[#f5b800] mt-0.5">
-                          {events.filter((e) => e.zone === zone).length} acc.
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="xl:col-span-7 flex flex-col justify-between">
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                      <span className="font-condensed font-bold text-sm uppercase flex items-center gap-1.5">
-                        <Users className="w-4 h-4 text-[#cc2016]" />
-                        2. Equipo, Posición y si es con Éxito (Acierto) o Negativo:
-                      </span>
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          onClick={() => setSelectedTeamFilter('Séneca CF')}
-                          className={`px-3 py-1 text-xs font-bold rounded ${
-                            selectedTeamFilter === 'Séneca CF'
-                              ? 'bg-[#cc2016] text-white'
-                              : 'bg-gray-200 text-gray-800'
-                          }`}
-                        >
-                          SÉNECA CF
-                        </button>
-                        <button
-                          onClick={() => setSelectedTeamFilter('Rival')}
-                          className={`px-3 py-1 text-xs font-bold rounded ${
-                            selectedTeamFilter === 'Rival'
-                              ? 'bg-[#1666c0] text-white'
-                              : 'bg-gray-200 text-gray-800'
-                          }`}
-                        >
-                          RIVAL ({rivalName})
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-1 mb-2">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedPlayerTag('')}
-                        className={`px-2 py-1 text-[11px] rounded border transition ${
-                          selectedPlayerTag === ''
-                            ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
-                            : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
-                        }`}
-                      >
-                        Sin posición marcada
-                      </button>
-                      {SENECA_PLAYERS.map((player) => (
-                        <button
-                          key={player}
-                          onClick={() =>
-                            setSelectedPlayerTag((prev) => (prev === player ? '' : player))
-                          }
-                          className={`px-2 py-1 text-[11px] rounded border transition ${
-                            selectedPlayerTag === player
-                              ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
-                              : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
-                          }`}
-                        >
-                          {player}
-                        </button>
-                      ))}
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-1.5 mb-2.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveDescriptors((prev) =>
-                            getClipOutcome(prev) === 'positivo'
-                              ? applyOutcomeToDescriptors(prev, 'neutro')
-                              : applyOutcomeToDescriptors(prev, 'positivo')
-                          )
-                        }
-                        className={`px-2.5 py-1 text-[11px] rounded border font-condensed font-bold uppercase transition ${
-                          getClipOutcome(activeDescriptors) === 'positivo'
-                            ? 'bg-emerald-600 text-white border-emerald-700'
-                            : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
-                        }`}
-                      >
-                        ✓ Con Éxito / Acierto
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setActiveDescriptors((prev) =>
-                            getClipOutcome(prev) === 'negativo'
-                              ? applyOutcomeToDescriptors(prev, 'neutro')
-                              : applyOutcomeToDescriptors(prev, 'negativo')
-                          )
-                        }
-                        className={`px-2.5 py-1 text-[11px] rounded border font-condensed font-bold uppercase transition ${
-                          getClipOutcome(activeDescriptors) === 'negativo'
-                            ? 'bg-[#cc2016] text-white border-red-800'
-                            : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
-                        }`}
-                      >
-                        ✕ Negativo / No Acertada
-                      </button>
-
-                      {NACSPORT_DESCRIPTORS.filter(
-                        (d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo'
-                      ).map((desc) => {
-                        const isOn = activeDescriptors.includes(desc);
-                        return (
-                          <button
-                            key={desc}
-                            onClick={() =>
-                              setActiveDescriptors((prev) =>
-                                prev.includes(desc) ? prev.filter((d) => d !== desc) : [...prev, desc]
-                              )
-                            }
-                            className={`px-2 py-0.5 text-[10.5px] rounded border transition ${
-                              isOn
-                                ? 'bg-[#15181d] text-[#f5b800] border-[#15181d] font-semibold'
-                                : 'bg-gray-50 text-gray-600 border-gray-300'
-                            }`}
-                          >
-                            {desc}
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
-                      {tagCategories.map((cat) => (
-                        <button
-                          key={cat.id}
-                          onClick={() => handleQuickCategoryTag(cat)}
-                          style={{ backgroundColor: cat.color }}
-                          className="text-white hover:opacity-90 p-2 rounded shadow-sm text-left transition flex flex-col justify-between h-[50px]"
-                        >
-                          <span className="font-condensed font-bold text-xs uppercase leading-tight">
-                            {cat.name}
-                          </span>
-                          <span className="text-[10px] opacity-90 font-mono">
-                            Total: {events.filter((e) => e.category === cat.name).length}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
+              {renderNacsportBotonera(isBotoneraFullscreen)}
             </div>
           )}
 
           {/* =====================================================================
               SECCIÓN INFERIOR IZQUIERDA: LÍNEA DE TIEMPO COMPLETA
              ===================================================================== */}
-          <div className="p-3 flex-1 flex flex-col justify-between bg-[#f4f4f4]">
+          {!isBotoneraFullscreen && (
+            <div className="p-3 flex-1 flex flex-col justify-between bg-[#f4f4f4]">
             <div>
               <div className="flex items-center justify-between mb-1.5 min-h-[24px]">
                 <div className="flex items-center gap-2 text-xs">
@@ -4689,12 +5322,14 @@ ${xmlInstances}
               )}
             </div>
           </div>
+          )}
         </div>
 
         {/* =====================================================================
             COLUMNA DERECHA (VÍDEOS, EVENTOS AGRUPADOS Y LISTAS DE PRESENTACIÓN, EXPORTACIÓN, PINTADO + KLIPDRAW)
            ===================================================================== */}
-        <aside className="w-full lg:w-[400px] xl:w-[425px] bg-white flex flex-col shrink-0 overflow-y-auto max-h-[calc(100vh-98px)]">
+        {!isBotoneraFullscreen && (
+          <aside className="w-full lg:w-[400px] xl:w-[425px] bg-white flex flex-col shrink-0 overflow-y-auto max-h-[calc(100vh-98px)]">
           {/* 1. SECCIÓN VÍDEOS */}
           <div className="p-3 border-b border-gray-200">
             <div className="flex items-center justify-between mb-2.5">
@@ -6255,7 +6890,94 @@ ${xmlInstances}
             )}
           </div>
         </aside>
+        )}
       </div>
+
+      {/* =====================================================================
+          PIE DE PÁGINA EN PANTALLA COMPLETA: TIRA DE EVENTOS RECIENTES EN DIRECTO
+         ===================================================================== */}
+      {isBotoneraFullscreen && (
+        <footer className="h-[46px] bg-[#141720] border-t border-[#252936] px-3 flex items-center justify-between shrink-0 text-xs z-40">
+          <div className="flex items-center gap-2 overflow-x-auto py-1 max-w-[85%]">
+            <span className="font-condensed font-bold text-gray-400 uppercase text-[11px] shrink-0 flex items-center gap-1">
+              <Activity className="w-3.5 h-3.5 text-[#f5b800]" />
+              Últimos Registros ({events.length}):
+            </span>
+            {events.length === 0 ? (
+              <span className="text-gray-500 text-[11px] italic">
+                No hay acciones registradas aún. Haz clic en cualquier botón de la botonera o pulsa su tecla rápida.
+              </span>
+            ) : (
+              events.slice(-6).reverse().map((ev) => {
+                const outcome = getClipOutcome(ev.descriptors);
+                return (
+                  <div
+                    key={ev.id}
+                    className={`flex items-center gap-1.5 px-2 py-1 rounded border text-[11px] shrink-0 bg-[#1c202c] ${
+                      lastDirectTaggedClipId === ev.id
+                        ? 'border-[#f5b800] ring-1 ring-[#f5b800]'
+                        : 'border-gray-700'
+                    }`}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: ev.color }}
+                    />
+                    <span className="font-bold text-white max-w-[120px] truncate">{ev.name}</span>
+                    <span className="text-gray-400 font-mono text-[10px]">
+                      {formatTimecode(ev.startTime)}
+                    </span>
+                    {ev.team && (
+                      <span
+                        className={`px-1 py-0.2 rounded text-[9px] font-bold ${
+                          ev.team === 'Séneca CF' ? 'bg-[#cc2016] text-white' : 'bg-blue-600 text-white'
+                        }`}
+                      >
+                        {ev.team === 'Séneca CF' ? 'SÉN' : 'RIV'}
+                      </span>
+                    )}
+                    {ev.player && (
+                      <span className="text-gray-300 text-[10px] font-medium truncate max-w-[80px]">
+                        {ev.player}
+                      </span>
+                    )}
+                    {outcome !== 'neutro' && (
+                      <span
+                        className={`px-1 py-0.2 rounded text-[9px] font-bold ${
+                          outcome === 'positivo' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
+                        }`}
+                      >
+                        {outcome === 'positivo' ? '✓' : '✕'}
+                      </span>
+                    )}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteClip(ev.id);
+                      }}
+                      className="ml-1 text-gray-400 hover:text-red-400 transition"
+                      title="Eliminar este corte recién registrado"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => exitBotoneraFullscreen()}
+              className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 hover:text-white rounded text-[11px] font-condensed font-bold uppercase transition flex items-center gap-1"
+              title="Salir del modo pantalla completa (o pulsa tecla ESC)"
+            >
+              <Minimize2 className="w-3 h-3" />
+              <span>Salir (ESC)</span>
+            </button>
+          </div>
+        </footer>
+      )}
 
       {/* =====================================================================
           MODAL: MATRIZ DE DATOS NACSPORT (POSICIONES, ACIERTO / NO ACERTADAS Y CATEGORÍAS)
@@ -6879,6 +7601,627 @@ ${xmlInstances}
                 className="px-4 py-1.5 bg-gray-800 text-white text-xs font-bold rounded"
               >
                 Cerrar Matriz
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL: CONSTRUCTOR Y EDITOR DE BOTONERA NACSPORT
+         ===================================================================== */}
+      {showBotoneraBuilderModal && (
+        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-3 sm:p-4 z-50">
+          <div className="bg-[#141822] text-white rounded-lg max-w-4xl w-full p-5 shadow-2xl border-t-4 border-[#cc2016] max-h-[92vh] flex flex-col">
+            {/* CABECERA DEL CONSTRUCTOR */}
+            <div className="flex items-center justify-between pb-3 border-b border-gray-700 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <Sliders className="w-6 h-6 text-[#f5b800]" />
+                <div>
+                  <h3 className="font-condensed font-bold text-lg uppercase text-white tracking-wide">
+                    CONSTRUCTOR DE BOTONERA NACSPORT (SÉNECA CF)
+                  </h3>
+                  <p className="text-xs text-gray-400">
+                    Crea y personaliza botones tácticos, atajos de teclado, modos manual/automático y descriptores
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => enterBotoneraFullscreen()}
+                  className="px-3 py-1 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-condensed font-bold uppercase rounded flex items-center gap-1"
+                >
+                  <Maximize2 className="w-3.5 h-3.5" />
+                  <span>Probar en Pantalla Completa</span>
+                </button>
+                <button
+                  onClick={() => setShowBotoneraBuilderModal(false)}
+                  className="text-gray-400 hover:text-white p-1"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* PESTAÑAS DEL CONSTRUCTOR */}
+            <div className="flex items-center gap-1 border-b border-gray-700 pt-3 pb-2 shrink-0">
+              <button
+                onClick={() => setBuilderTab('categorias')}
+                className={`px-3 py-1.5 font-condensed font-bold text-xs uppercase rounded transition ${
+                  builderTab === 'categorias'
+                    ? 'bg-[#cc2016] text-white'
+                    : 'bg-[#1c2230] text-gray-300 hover:bg-[#252c3d]'
+                }`}
+              >
+                1. Botones de Categoría ({tagCategories.length})
+              </button>
+              <button
+                onClick={() => setBuilderTab('descriptores')}
+                className={`px-3 py-1.5 font-condensed font-bold text-xs uppercase rounded transition ${
+                  builderTab === 'descriptores'
+                    ? 'bg-[#cc2016] text-white'
+                    : 'bg-[#1c2230] text-gray-300 hover:bg-[#252c3d]'
+                }`}
+              >
+                2. Descriptores ({customDescriptors.length})
+              </button>
+              <button
+                onClick={() => setBuilderTab('diseno')}
+                className={`px-3 py-1.5 font-condensed font-bold text-xs uppercase rounded transition ${
+                  builderTab === 'diseno'
+                    ? 'bg-[#cc2016] text-white'
+                    : 'bg-[#1c2230] text-gray-300 hover:bg-[#252c3d]'
+                }`}
+              >
+                3. Diseño y Comportamiento
+              </button>
+              <button
+                onClick={() => setBuilderTab('plantillas')}
+                className={`px-3 py-1.5 font-condensed font-bold text-xs uppercase rounded transition ${
+                  builderTab === 'plantillas'
+                    ? 'bg-[#cc2016] text-white'
+                    : 'bg-[#1c2230] text-gray-300 hover:bg-[#252c3d]'
+                }`}
+              >
+                4. Plantillas de Botonera ({botoneraTemplates.length})
+              </button>
+            </div>
+
+            {/* CONTENIDO DE PESTAÑAS */}
+            <div className="flex-1 overflow-y-auto py-3 space-y-4">
+              {/* TAB 1: CATEGORÍAS */}
+              {builderTab === 'categorias' && (
+                <div className="space-y-4">
+                  {/* FORMULARIO AÑADIR NUEVO BOTÓN */}
+                  <div className="bg-[#1a202c] p-3.5 rounded border border-gray-700">
+                    <span className="font-condensed font-bold text-xs uppercase text-[#f5b800] block mb-2">
+                      + CREAR NUEVO BOTÓN DE ACCIÓN / CATEGORÍA
+                    </span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 mb-2.5">
+                      <div>
+                        <label className="text-[11px] text-gray-400 block mb-1">Nombre de la Categoría</label>
+                        <input
+                          type="text"
+                          value={newCatName}
+                          onChange={(e) => setNewCatName(e.target.value)}
+                          placeholder="Ej: Salida de 3, Pase Filtrado..."
+                          className="w-full bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#cc2016]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] text-gray-400 block mb-1">Fase / Tipo Táctico</label>
+                        <select
+                          value={newCatType}
+                          onChange={(e) => setNewCatType(e.target.value as any)}
+                          className="w-full bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none"
+                        >
+                          <option value="Ataque">Ataque</option>
+                          <option value="Defensa">Defensa</option>
+                          <option value="Transición">Transición</option>
+                          <option value="ABP">Balón Parado (ABP)</option>
+                          <option value="Resultado">Resultado</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] text-gray-400 block mb-1">Modo de Grabación</label>
+                        <select
+                          value={newCatMode}
+                          onChange={(e) => setNewCatMode(e.target.value as any)}
+                          className="w-full bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none"
+                        >
+                          <option value="auto">Automático (-Pre / +Post)</option>
+                          <option value="manual">Manual (1º Clic Inicia, 2º Clic Cierra)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-[11px] text-gray-400 block mb-1">Tecla Rápida / Atajo</label>
+                        <input
+                          type="text"
+                          maxLength={3}
+                          value={newCatShortcut}
+                          onChange={(e) => setNewCatShortcut(e.target.value.toUpperCase())}
+                          placeholder={`Auto (${tagCategories.length < 9 ? tagCategories.length + 1 : '0'})`}
+                          className="w-full bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-center font-mono font-bold text-[#f5b800] focus:outline-none focus:border-[#cc2016]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      {newCatMode === 'auto' ? (
+                        <div className="flex items-center gap-3 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-400">Pre-roll (-s):</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={30}
+                              value={newCatPreRoll}
+                              onChange={(e) => setNewCatPreRoll(Number(e.target.value))}
+                              className="w-14 bg-[#11141c] border border-gray-700 rounded px-2 py-1 text-center font-bold text-white text-xs"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-gray-400">Post-roll (+s):</span>
+                            <input
+                              type="number"
+                              min={1}
+                              max={30}
+                              value={newCatPostRoll}
+                              onChange={(e) => setNewCatPostRoll(Number(e.target.value))}
+                              className="w-14 bg-[#11141c] border border-gray-700 rounded px-2 py-1 text-center font-bold text-white text-xs"
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-amber-300">
+                          ● Modo manual: Al pulsar graba en directo hasta que vuelvas a pulsar el botón o su atajo.
+                        </span>
+                      )}
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] text-gray-400">Color:</span>
+                        <input
+                          type="color"
+                          value={newCatColor}
+                          onChange={(e) => setNewCatColor(e.target.value)}
+                          className="w-8 h-8 rounded border border-gray-600 bg-transparent cursor-pointer p-0.5"
+                        />
+                        <div className="flex items-center gap-1">
+                          {['#cc2016', '#e65100', '#f5b800', '#2e7d32', '#1565c0', '#00838f', '#4527a0', '#6a1b9a'].map(
+                            (c) => (
+                              <button
+                                key={c}
+                                type="button"
+                                onClick={() => setNewCatColor(c)}
+                                style={{ backgroundColor: c }}
+                                className={`w-5 h-5 rounded-full border ${
+                                  newCatColor === c ? 'ring-2 ring-white scale-110' : 'border-gray-700'
+                                }`}
+                              />
+                            )
+                          )}
+                        </div>
+
+                        <button
+                          onClick={handleAddNewCategory}
+                          className="ml-2 px-4 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase rounded shadow"
+                        >
+                          + Añadir Botón
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* LISTA DE BOTONES DE CATEGORÍA EXISTENTES */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="font-condensed font-bold text-xs uppercase text-gray-300">
+                        BOTONES ACTIVOS EN LA BOTONERA ({tagCategories.length})
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => {
+                            if (window.confirm('¿Restaurar las 10 categorías por defecto?')) {
+                              setTagCategories(DEFAULT_TAG_CATEGORIES);
+                              notify('Categorías restauradas por defecto');
+                            }
+                          }}
+                          className="text-[11px] text-gray-400 hover:text-white underline"
+                        >
+                          Restaurar por defecto
+                        </button>
+                        <button
+                          onClick={() => {
+                            if (window.confirm('¿Vaciar todos los botones de la botonera para empezar desde cero?')) {
+                              setTagCategories([]);
+                              notify('Botonera vaciada. Añade tus propios botones arriba');
+                            }
+                          }}
+                          className="text-[11px] text-red-400 hover:text-red-300 underline"
+                        >
+                          Vaciar botonera
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5 max-h-[340px] overflow-y-auto pr-1">
+                      {tagCategories.map((cat, idx) => (
+                        <div
+                          key={cat.id}
+                          className="bg-[#1a202c] p-2.5 rounded border border-gray-700 flex flex-wrap items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="flex items-center gap-2.5 flex-1 min-w-[200px]">
+                            <input
+                              type="color"
+                              value={cat.color}
+                              onChange={(e) => {
+                                const col = e.target.value;
+                                setTagCategories((prev) =>
+                                  prev.map((c) => (c.id === cat.id ? { ...c, color: col } : c))
+                                );
+                              }}
+                              className="w-6 h-6 rounded border border-gray-600 bg-transparent cursor-pointer p-0.5 shrink-0"
+                            />
+                            <input
+                              type="text"
+                              value={cat.name}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setTagCategories((prev) =>
+                                  prev.map((c) => (c.id === cat.id ? { ...c, name: val } : c))
+                                );
+                              }}
+                              className="bg-[#11141c] border border-gray-700 rounded px-2 py-1 text-xs text-white font-bold flex-1"
+                            />
+                            <span className="px-1.5 py-0.5 bg-black/40 rounded text-[10px] text-gray-400 shrink-0 uppercase">
+                              {cat.type}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* Toggle modo auto / manual */}
+                            <button
+                              onClick={() => {
+                                const nextMode = cat.mode === 'manual' ? 'auto' : 'manual';
+                                setTagCategories((prev) =>
+                                  prev.map((c) => (c.id === cat.id ? { ...c, mode: nextMode } : c))
+                                );
+                              }}
+                              className={`px-2 py-0.5 rounded text-[10.5px] font-bold border transition ${
+                                cat.mode === 'manual'
+                                  ? 'bg-amber-900/40 text-amber-300 border-amber-600'
+                                  : 'bg-gray-800 text-gray-300 border-gray-700'
+                              }`}
+                            >
+                              {cat.mode === 'manual' ? 'REC Manual' : 'Corte Auto'}
+                            </button>
+
+                            {cat.mode !== 'manual' && (
+                              <div className="flex items-center gap-1 text-[11px] text-gray-400">
+                                <span>-{cat.preRoll}s</span>
+                                <span>/+{cat.postRoll}s</span>
+                              </div>
+                            )}
+
+                            {/* Shortcut input */}
+                            <input
+                              type="text"
+                              maxLength={3}
+                              value={cat.shortcut || ''}
+                              onChange={(e) => {
+                                const s = e.target.value.toUpperCase();
+                                setTagCategories((prev) =>
+                                  prev.map((c) => (c.id === cat.id ? { ...c, shortcut: s } : c))
+                                );
+                              }}
+                              placeholder="Atajo"
+                              className="w-12 bg-[#11141c] border border-gray-700 rounded px-1.5 py-0.5 text-center font-mono font-bold text-[#f5b800] text-xs"
+                            />
+
+                            {/* Reordenar */}
+                            <button
+                              disabled={idx === 0}
+                              onClick={() => handleMoveCategory(idx, 'up')}
+                              className="p-1 hover:text-[#f5b800] disabled:opacity-30"
+                              title="Subir posición"
+                            >
+                              <ArrowUp className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              disabled={idx === tagCategories.length - 1}
+                              onClick={() => handleMoveCategory(idx, 'down')}
+                              className="p-1 hover:text-[#f5b800] disabled:opacity-30"
+                              title="Bajar posición"
+                            >
+                              <ArrowDown className="w-3.5 h-3.5" />
+                            </button>
+
+                            {/* Eliminar */}
+                            <button
+                              onClick={() => handleDeleteCategory(cat.id)}
+                              className="p-1 text-red-400 hover:text-red-300"
+                              title="Eliminar este botón"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: DESCRIPTORES */}
+              {builderTab === 'descriptores' && (
+                <div className="space-y-4">
+                  <div className="bg-[#1a202c] p-3.5 rounded border border-gray-700">
+                    <span className="font-condensed font-bold text-xs uppercase text-[#f5b800] block mb-2">
+                      + AÑADIR NUEVO DESCRIPTOR PERSONALIZADO
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={newDescriptorInput}
+                        onChange={(e) => setNewDescriptorInput(e.target.value)}
+                        placeholder="Ej: Pase Filtrado, Desmarque de Ruptura, Balón Largo..."
+                        className="flex-1 bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#cc2016]"
+                      />
+                      <button
+                        onClick={() => {
+                          if (!newDescriptorInput.trim()) return;
+                          if (customDescriptors.includes(newDescriptorInput.trim())) {
+                            notify('Este descriptor ya existe');
+                            return;
+                          }
+                          setCustomDescriptors([...customDescriptors, newDescriptorInput.trim()]);
+                          setNewDescriptorInput('');
+                          notify('Descriptor añadido con éxito');
+                        }}
+                        className="px-4 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase rounded"
+                      >
+                        + Añadir Descriptor
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="font-condensed font-bold text-xs uppercase text-gray-300 block mb-2">
+                      DESCRIPTORES EN LA BOTONERA ({customDescriptors.length})
+                    </span>
+                    <div className="flex flex-wrap gap-2 max-h-[300px] overflow-y-auto p-2 bg-[#1a202c] rounded border border-gray-700">
+                      {customDescriptors.map((desc) => (
+                        <div
+                          key={desc}
+                          className="flex items-center gap-1.5 px-2.5 py-1 bg-[#11141c] rounded border border-gray-700 text-xs text-white"
+                        >
+                          <span>{desc}</span>
+                          <button
+                            onClick={() => {
+                              setCustomDescriptors(customDescriptors.filter((d) => d !== desc));
+                            }}
+                            className="text-gray-400 hover:text-red-400 ml-1"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: DISEÑO Y COMPORTAMIENTO */}
+              {builderTab === 'diseno' && (
+                <div className="space-y-4 text-xs">
+                  <div className="bg-[#1a202c] p-4 rounded border border-gray-700 space-y-3">
+                    <span className="font-condensed font-bold text-sm uppercase text-[#f5b800] block">
+                      CONFIGURACIÓN VISUAL DE LA BOTONERA
+                    </span>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-gray-400 block mb-1.5 font-bold">Número de Columnas</label>
+                        <div className="flex items-center gap-2">
+                          {[2, 3, 4, 5, 6].map((num) => (
+                            <button
+                              key={num}
+                              onClick={() => setBotoneraColumns(num)}
+                              className={`px-3 py-1.5 rounded font-bold transition ${
+                                botoneraColumns === num
+                                  ? 'bg-[#cc2016] text-white'
+                                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                              }`}
+                            >
+                              {num} col
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="text-gray-400 block mb-1.5 font-bold">Tamaño de los Botones</label>
+                        <div className="flex items-center gap-2">
+                          {[
+                            { key: 'sm', label: 'Compacto' },
+                            { key: 'md', label: 'Estándar' },
+                            { key: 'lg', label: 'Grande (Táctil)' },
+                          ].map((s) => (
+                            <button
+                              key={s.key}
+                              onClick={() => setBotoneraButtonSize(s.key as any)}
+                              className={`px-3 py-1.5 rounded font-bold transition ${
+                                botoneraButtonSize === s.key
+                                  ? 'bg-[#cc2016] text-white'
+                                  : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+                              }`}
+                            >
+                              {s.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-gray-700 space-y-2">
+                      <span className="text-gray-400 block font-bold">Bloques Visibles en la Botonera:</span>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={showPitchInBotonera}
+                            onChange={(e) => setShowPitchInBotonera(e.target.checked)}
+                            className="rounded accent-[#cc2016]"
+                          />
+                          <span>Mostrar Mapa de 9 Zonas Tácticas</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={showPlayersInBotonera}
+                            onChange={(e) => setShowPlayersInBotonera(e.target.checked)}
+                            className="rounded accent-[#cc2016]"
+                          />
+                          <span>Mostrar Dorsales / Jugadores Rápidos</span>
+                        </label>
+                        <label className="flex items-center gap-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={showDescriptorsInBotonera}
+                            onChange={(e) => setShowDescriptorsInBotonera(e.target.checked)}
+                            className="rounded accent-[#cc2016]"
+                          />
+                          <span>Mostrar Tira de Descriptores Extra</span>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="pt-3 border-t border-gray-700 space-y-2">
+                      <span className="text-gray-400 block font-bold">Modo de Marcaje:</span>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => setDirectOneClickMode(true)}
+                          className={`p-3 rounded border flex-1 text-left transition ${
+                            directOneClickMode
+                              ? 'bg-emerald-950/50 border-emerald-500 text-emerald-300'
+                              : 'bg-gray-800/40 border-gray-700 text-gray-400'
+                          }`}
+                        >
+                          <b className="block text-sm">⚡ Modo Directo 1-Clic (Recomendado Nacsport Live)</b>
+                          <span className="text-[11px] opacity-80 block mt-1">
+                            Al hacer clic en una categoría se registra el corte al instante sin pausar el partido.
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => setDirectOneClickMode(false)}
+                          className={`p-3 rounded border flex-1 text-left transition ${
+                            !directOneClickMode
+                              ? 'bg-amber-950/50 border-amber-500 text-amber-300'
+                              : 'bg-gray-800/40 border-gray-700 text-gray-400'
+                          }`}
+                        >
+                          <b className="block text-sm">📝 Modo con Ventana de Clasificación</b>
+                          <span className="text-[11px] opacity-80 block mt-1">
+                            Pausa el vídeo al pulsar para elegir jugador, éxito/fallo y notas tácticas detalladas.
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 4: PLANTILLAS */}
+              {builderTab === 'plantillas' && (
+                <div className="space-y-4">
+                  <div className="bg-[#1a202c] p-3.5 rounded border border-gray-700">
+                    <span className="font-condensed font-bold text-xs uppercase text-[#f5b800] block mb-2">
+                      GUARDAR BOTONERA ACTUAL COMO NUEVA PLANTILLA
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={newTemplateNameInput}
+                        onChange={(e) => setNewTemplateNameInput(e.target.value)}
+                        placeholder="Nombre de la nueva plantilla (ej: Botonera Juvenil DH, Botonera ABP...)"
+                        className="flex-1 bg-[#11141c] border border-gray-700 rounded px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-[#cc2016]"
+                      />
+                      <button
+                        onClick={() => handleSaveCurrentAsTemplate(newTemplateNameInput)}
+                        className="px-4 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase rounded"
+                      >
+                        Guardar Plantilla
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <span className="font-condensed font-bold text-xs uppercase text-gray-300 block mb-2">
+                      PLANTILLAS DISPONIBLES ({botoneraTemplates.length})
+                    </span>
+                    <div className="space-y-2">
+                      {botoneraTemplates.map((tpl) => (
+                        <div
+                          key={tpl.id}
+                          className={`p-3 rounded border flex items-center justify-between gap-3 ${
+                            activeTemplateId === tpl.id
+                              ? 'bg-[#1b2333] border-[#cc2016]'
+                              : 'bg-[#1a202c] border-gray-700'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-condensed font-bold text-sm text-white uppercase">{tpl.name}</span>
+                              {activeTemplateId === tpl.id && (
+                                <span className="px-2 py-0.2 bg-[#cc2016] text-white text-[10px] font-bold rounded">
+                                  ACTIVA
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-xs text-gray-400 block mt-0.5">
+                              {tpl.description || `${tpl.categories.length} categorías tácticas`}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {activeTemplateId !== tpl.id && (
+                              <button
+                                onClick={() => handleApplyTemplate(tpl)}
+                                className="px-3 py-1 bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-bold rounded"
+                              >
+                                Cargar
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleDeleteTemplate(tpl.id)}
+                              disabled={botoneraTemplates.length <= 1}
+                              className="p-1 text-red-400 hover:text-red-300 disabled:opacity-30"
+                              title="Eliminar plantilla"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* PIE DEL MODAL */}
+            <div className="pt-3 border-t border-gray-700 flex items-center justify-between shrink-0">
+              <span className="text-xs text-gray-400">
+                Las botoneras se guardan automáticamente y sincronizan con tus proyectos.
+              </span>
+              <button
+                onClick={() => setShowBotoneraBuilderModal(false)}
+                className="px-5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase rounded"
+              >
+                Cerrar Constructor
               </button>
             </div>
           </div>
