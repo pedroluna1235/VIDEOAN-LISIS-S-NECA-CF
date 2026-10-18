@@ -428,13 +428,20 @@ export function renderDrawingActions(
         ctx.clip();
 
         if (videoElement && videoElement.readyState >= 2) {
-          const vw = videoElement.videoWidth || 1280;
-          const vh = videoElement.videoHeight || 720;
-          const sx = (start.x / 1280) * vw - (radius / 1280) * vw * 0.5;
-          const sy = (start.y / 720) * vh - (radius / 720) * vh * 0.5;
-          const sw = (radius / 1280) * vw;
-          const sh = (radius / 720) * vh;
-          ctx.drawImage(videoElement, sx, sy, sw, sh, start.x - radius, start.y - radius, radius * 2, radius * 2);
+          try {
+            const vw = videoElement.videoWidth || 1280;
+            const vh = videoElement.videoHeight || 720;
+            const sx = Math.max(0, (start.x / 1280) * vw - (radius / 1280) * vw * 0.5);
+            const sy = Math.max(0, (start.y / 720) * vh - (radius / 720) * vh * 0.5);
+            const sw = Math.min(vw - sx, (radius / 1280) * vw);
+            const sh = Math.min(vh - sy, (radius / 720) * vh);
+            if (sw > 0 && sh > 0) {
+              ctx.drawImage(videoElement, sx, sy, sw, sh, start.x - radius, start.y - radius, radius * 2, radius * 2);
+            }
+          } catch {
+            ctx.fillStyle = hexToRgba(action.color, 0.25);
+            ctx.fillRect(start.x - radius, start.y - radius, radius * 2, radius * 2);
+          }
         } else {
           ctx.fillStyle = hexToRgba(action.color, 0.25);
           ctx.fillRect(start.x - radius, start.y - radius, radius * 2, radius * 2);
@@ -523,9 +530,16 @@ export function renderDrawingActions(
       case 'escudo_seneca': {
         ctx.setLineDash([]);
         const size = Math.round(48 * scaleFactor);
-        if (senecaLogoImg && senecaLogoImg.complete) {
-          ctx.drawImage(senecaLogoImg, start.x - size / 2, start.y - size / 2, size, size);
-        } else {
+        let drawn = false;
+        if (senecaLogoImg && senecaLogoImg.complete && senecaLogoImg.naturalWidth > 0) {
+          try {
+            ctx.drawImage(senecaLogoImg, start.x - size / 2, start.y - size / 2, size, size);
+            drawn = true;
+          } catch {
+            drawn = false;
+          }
+        }
+        if (!drawn) {
           ctx.beginPath();
           ctx.arc(start.x, start.y, size / 2, 0, Math.PI * 2);
           ctx.fillStyle = '#f5b800';

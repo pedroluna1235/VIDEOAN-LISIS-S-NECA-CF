@@ -214,6 +214,14 @@ export default function App() {
 
   const [currentDraftAction, setCurrentDraftAction] = useState<DrawingAction | null>(null);
   const [multiPointDraft, setMultiPointDraft] = useState<DrawingAction | null>(null);
+  const [activeFreezeOverlay, setActiveFreezeOverlay] = useState<{
+    eventId: string;
+    dataUrl: string;
+    remaining: number;
+    total: number;
+    resumeAfter: boolean;
+  } | null>(null);
+  const triggeredFreezeIdsRef = useRef<Set<string>>(new Set());
 
   // Plantilla de Números y Jugadores
   const [rosterPlayers, setRosterPlayers] = useState<RosterPlayerItem[]>(DEFAULT_ROSTER_PLAYERS);
@@ -256,9 +264,9 @@ export default function App() {
       };
       setHistory((prev) => {
         const sliced = prev.slice(0, historyIndex + 1);
-        return [...sliced.slice(-30), snap];
+        return [...sliced.slice(-15), snap];
       });
-      setHistoryIndex((prev) => Math.min(prev + 1, 30));
+      setHistoryIndex((prev) => Math.min(prev + 1, 15));
     },
     [events, captures, drawings, markers, historyIndex]
   );
@@ -293,17 +301,17 @@ export default function App() {
 
   // Cargar desde LocalStorage y sincronizar con Supabase al iniciar
   useEffect(() => {
-    const localRaw = localStorage.getItem('seneca_cf_current_project');
-    if (localRaw) {
-      try {
+    try {
+      const localRaw = localStorage.getItem('seneca_cf_current_project');
+      if (localRaw) {
         const parsed: SenecaProject = JSON.parse(localRaw);
         setProjectId(parsed.id || 'seneca-default-project');
         setProjectName(parsed.name || 'Jornada 1 - Séneca CF vs Rival');
         setRivalName(parsed.rival || 'Rival FC');
         setCompetition(parsed.competition || 'División de Honor');
-        setEvents(parsed.events || []);
-        setCaptures(parsed.captures || []);
-        setDrawings(parsed.drawings || []);
+        setEvents(Array.isArray(parsed.events) ? parsed.events : []);
+        setCaptures(Array.isArray(parsed.captures) ? parsed.captures : []);
+        setDrawings(Array.isArray(parsed.drawings) ? parsed.drawings : []);
         setMarkers(parsed.markers || {});
         if (parsed.tag_categories && parsed.tag_categories.length > 0) {
           setTagCategories(parsed.tag_categories);
@@ -311,9 +319,9 @@ export default function App() {
         if (parsed.playlists && parsed.playlists.length > 0) {
           setPlaylists(parsed.playlists);
         }
-      } catch (e) {
-        console.warn('Error cargando estado local:', e);
       }
+    } catch (e) {
+      console.warn('Error cargando estado local:', e);
     }
 
     fetchProjectsFromSupabase();
@@ -362,7 +370,7 @@ export default function App() {
     }
   };
 
-  // Auto-guardado en LocalStorage + Supabase
+  // Auto-guardado seguro en LocalStorage + Supabase (protegido contra QuotaExceededError)
   useEffect(() => {
     const projectPayload: SenecaProject = {
       id: projectId,
@@ -380,7 +388,29 @@ export default function App() {
       updated_at: new Date().toISOString(),
     };
 
-    localStorage.setItem('seneca_cf_current_project', JSON.stringify(projectPayload));
+    try {
+      localStorage.setItem('seneca_cf_current_project', JSON.stringify(projectPayload));
+    } catch {
+      try {
+        const lightPayload: SenecaProject = {
+          ...projectPayload,
+          events: events.map(({ drawingDataUrl, ...rest }) => rest),
+          captures: captures.slice(0, 6),
+        };
+        localStorage.setItem('seneca_cf_current_project', JSON.stringify(lightPayload));
+      } catch {
+        try {
+          const minimalPayload: SenecaProject = {
+            ...projectPayload,
+            events: events.map(({ drawingDataUrl, ...rest }) => rest),
+            captures: [],
+          };
+          localStorage.setItem('seneca_cf_current_project', JSON.stringify(minimalPayload));
+        } catch (err) {
+          console.warn('No se pudo guardar en localStorage por límite de cuota:', err);
+        }
+      }
+    }
 
     const timer = setTimeout(async () => {
       try {
@@ -409,6 +439,29 @@ export default function App() {
     tagCategories,
     playlists,
   ]);
+
+  // Temporizador de pausa táctica cuando se reproduce o previsualiza un dibujo insertado en el vídeo
+  useEffect(() => {
+    if (!activeFreezeOverlay) return;
+    const interval = setInterval(() => {
+      setActiveFreezeOverlay((prev) => {
+        if (!prev) return null;
+        if (prev.remaining <= 0.15) {
+          if (prev.resumeAfter && videoRef.current && activeVideo) {
+            videoRef.current.currentTime = Math.min(
+              duration || 99999,
+              videoRef.current.currentTime + 0.2
+            );
+            videoRef.current.play().catch(() => {});
+            setIsPlaying(true);
+          }
+          return null;
+        }
+        return { ...prev, remaining: Number((prev.remaining - 0.1).toFixed(1)) };
+      });
+    }, 100);
+    return () => clearInterval(interval);
+  }, [activeFreezeOverlay, activeVideo, duration]);
 
   // Cronómetro en vivo para Registro Sin Vídeo
   useEffect(() => {
@@ -507,6 +560,31 @@ export default function App() {
     if (!videoRef.current) return;
     const t = videoRef.current.currentTime;
     setCurrentTime(t);
+
+    // Pausa táctica automática cuando el vídeo pasa por un dibujo insertado ("Insertar en el vídeo")
+    if (!videoRef.current.paused && !activeFreezeOverlay) {
+      for (const ev of events) {
+        if (ev.isFreezeInsert && ev.drawingDataUrl) {
+          const ft = ev.freezeTimestamp ?? ev.startTime;
+          if (Math.abs(t - ft) > 0.9) {
+            triggeredFreezeIdsRef.current.delete(ev.id);
+          } else if (Math.abs(t - ft) <= 0.28 && !triggeredFreezeIdsRef.current.has(ev.id)) {
+            triggeredFreezeIdsRef.current.add(ev.id);
+            videoRef.current.pause();
+            setIsPlaying(false);
+            const dur = ev.freezeDuration || insertFreezeSeconds || 5;
+            setActiveFreezeOverlay({
+              eventId: ev.id,
+              dataUrl: ev.drawingDataUrl,
+              remaining: dur,
+              total: dur,
+              resumeAfter: true,
+            });
+            return;
+          }
+        }
+      }
+    }
 
     // Si estamos reproduciendo una cola de cortes agrupados o lista de presentación
     if (playingQueue && playingQueue.length > 0) {
@@ -884,49 +962,104 @@ export default function App() {
     }
   };
 
-  const buildCompositeCanvasDataUrl = (): string | null => {
-    const outCanvas = document.createElement('canvas');
-    outCanvas.width = 1280;
-    outCanvas.height = 720;
-    const ctx = outCanvas.getContext('2d');
-    if (!ctx) return null;
+  const drawPitchFallback = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+    ctx.fillStyle = '#1b5e20';
+    ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(50, 40, width - 100, height - 80);
+    ctx.beginPath();
+    ctx.moveTo(width / 2, 40);
+    ctx.lineTo(width / 2, height - 40);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(width / 2, height / 2, 70, 0, Math.PI * 2);
+    ctx.stroke();
+  };
 
-    if (videoRef.current && activeVideo && videoRef.current.readyState >= 2) {
-      ctx.drawImage(videoRef.current, 0, 0, outCanvas.width, outCanvas.height);
-    } else {
-      ctx.fillStyle = '#1b5e20';
-      ctx.fillRect(0, 0, outCanvas.width, outCanvas.height);
-      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
-      ctx.lineWidth = 3;
-      ctx.strokeRect(50, 40, 1180, 640);
-      ctx.beginPath();
-      ctx.moveTo(640, 40);
-      ctx.lineTo(640, 680);
-      ctx.stroke();
+  const buildCompositeCanvasDataUrl = (
+    format: 'png' | 'jpeg' = 'jpeg',
+    customDrawings?: DrawingAction[]
+  ): string | null => {
+    try {
+      const outCanvas = document.createElement('canvas');
+      outCanvas.width = 1280;
+      outCanvas.height = 720;
+      const ctx = outCanvas.getContext('2d');
+      if (!ctx) return null;
+
+      const safeTime = Number.isFinite(currentTime) ? currentTime : 0;
+      const listToDraw = customDrawings ?? drawings;
+
+      let drewVideo = false;
+      if (videoRef.current && activeVideo && videoRef.current.readyState >= 2) {
+        try {
+          ctx.drawImage(videoRef.current, 0, 0, outCanvas.width, outCanvas.height);
+          drewVideo = true;
+        } catch {
+          drewVideo = false;
+        }
+      }
+      if (!drewVideo) {
+        drawPitchFallback(ctx, outCanvas.width, outCanvas.height);
+      }
+
+      renderDrawingActions(ctx, listToDraw, {
+        currentTime: safeTime,
+        selectedId: null,
+        ignoreTimeVisibility: true,
+        videoElement: videoRef.current,
+        senecaLogoImg: senecaLogoRef.current,
+      });
+
+      ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
+      ctx.fillRect(24, 658, 330, 42);
+      ctx.fillStyle = '#cc2016';
+      ctx.fillRect(24, 658, 7, 42);
+      ctx.fillStyle = '#f5b800';
+      ctx.font = 'bold 16px "Barlow Condensed", sans-serif';
+      ctx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(safeTime)}`, 42, 684);
+
+      try {
+        return format === 'png'
+          ? outCanvas.toDataURL('image/png')
+          : outCanvas.toDataURL('image/jpeg', 0.84);
+      } catch {
+        // Fallback si el vídeo o imagen externa bloquea el canvas por CORS
+        const cleanCanvas = document.createElement('canvas');
+        cleanCanvas.width = 1280;
+        cleanCanvas.height = 720;
+        const cleanCtx = cleanCanvas.getContext('2d');
+        if (!cleanCtx) return null;
+        drawPitchFallback(cleanCtx, 1280, 720);
+        renderDrawingActions(cleanCtx, listToDraw, {
+          currentTime: safeTime,
+          selectedId: null,
+          ignoreTimeVisibility: true,
+          videoElement: null,
+          senecaLogoImg: null,
+        });
+        cleanCtx.fillStyle = 'rgba(20, 20, 20, 0.88)';
+        cleanCtx.fillRect(24, 658, 330, 42);
+        cleanCtx.fillStyle = '#cc2016';
+        cleanCtx.fillRect(24, 658, 7, 42);
+        cleanCtx.fillStyle = '#f5b800';
+        cleanCtx.font = 'bold 16px "Barlow Condensed", sans-serif';
+        cleanCtx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(safeTime)}`, 42, 684);
+        return cleanCanvas.toDataURL('image/jpeg', 0.84);
+      }
+    } catch (err) {
+      console.error('Error generando imagen compuesta del pintado:', err);
+      return null;
     }
-
-    renderDrawingActions(ctx, drawings, {
-      currentTime,
-      selectedId: null,
-      ignoreTimeVisibility: true,
-      videoElement: videoRef.current,
-      senecaLogoImg: senecaLogoRef.current,
-    });
-
-    ctx.fillStyle = 'rgba(20, 20, 20, 0.88)';
-    ctx.fillRect(24, 658, 330, 42);
-    ctx.fillStyle = '#cc2016';
-    ctx.fillRect(24, 658, 7, 42);
-    ctx.fillStyle = '#f5b800';
-    ctx.font = 'bold 16px "Barlow Condensed", sans-serif';
-    ctx.fillText(`ANÁLISIS SÉNECA CF | ${formatTimecode(currentTime)}`, 42, 684);
-
-    return outCanvas.toDataURL('image/png');
   };
 
   const handleExportPNG = () => {
-    const dataUrl = buildCompositeCanvasDataUrl();
-    if (!dataUrl) return;
+    const dataUrl = buildCompositeCanvasDataUrl('png');
+    if (!dataUrl) {
+      notify('No se pudo generar la imagen PNG');
+      return;
+    }
     const a = document.createElement('a');
     a.href = dataUrl;
     a.download = `Pintado_Seneca_CF_${formatTimecode(currentTime).replace(/[:.]/g, '-')}.png`;
@@ -935,41 +1068,116 @@ export default function App() {
   };
 
   const handleInsertPaintedFrameInVideo = () => {
-    const dataUrl = buildCompositeCanvasDataUrl();
-    if (!dataUrl) return;
+    if (videoRef.current && !videoRef.current.paused) {
+      videoRef.current.pause();
+      setIsPlaying(false);
+    }
+
+    const safeTime = Number.isFinite(currentTime) ? Number(currentTime.toFixed(1)) : 0;
+    const freezeSecs = Math.max(1, Number(insertFreezeSeconds) || 5);
+
+    // Si había un polígono/conector en curso al pulsar Insertar, lo cerramos e incluimos
+    let updatedDrawings = [...drawings];
+    if (multiPointDraft && multiPointDraft.points.length >= 2) {
+      updatedDrawings.push({
+        ...multiPointDraft,
+        points:
+          multiPointDraft.points.length > 2
+            ? multiPointDraft.points.slice(0, -1)
+            : multiPointDraft.points,
+        closed: true,
+        timestamp: safeTime,
+      });
+      setMultiPointDraft(null);
+    }
+    if (currentDraftAction && currentDraftAction.points.length >= 2) {
+      updatedDrawings.push({
+        ...currentDraftAction,
+        timestamp: safeTime,
+      });
+      setCurrentDraftAction(null);
+    }
+
+    // Anclar los dibujos visibles al segundo actual del vídeo para que se vean al reproducir
+    updatedDrawings = updatedDrawings.map((d) => {
+      const isCurrentlyShown =
+        drawingMode ||
+        d.visibleDuration === 0 ||
+        Math.abs(safeTime - d.timestamp) <= Math.max(d.visibleDuration, freezeSecs);
+      if (isCurrentlyShown) {
+        return {
+          ...d,
+          timestamp: safeTime,
+          visibleDuration: Math.max(d.visibleDuration || freezeSecs, freezeSecs),
+        };
+      }
+      return d;
+    });
+
+    setDrawings(updatedDrawings);
+    setSelectedDrawingId(null);
+
+    const dataUrl = buildCompositeCanvasDataUrl('jpeg', updatedDrawings);
+    if (!dataUrl) {
+      notify('No se pudo insertar el pintado en el vídeo');
+      return;
+    }
 
     const newCap: CaptureItem = {
       id: `cap-${Date.now()}`,
-      name: `Pizarra (${insertFreezeSeconds}s) @ ${formatTimecode(currentTime)}`,
-      timestamp: currentTime,
+      name: `Pizarra (${freezeSecs}s) @ ${formatTimecode(safeTime)}`,
+      timestamp: safeTime,
       dataUrl,
-      freezeDuration: insertFreezeSeconds,
+      freezeDuration: freezeSecs,
       createdAt: new Date().toISOString(),
     };
     const nextCaps = [newCap, ...captures];
     setCaptures(nextCaps);
 
+    let detectedHalf: '1ª Parte' | '2ª Parte' = liveHalf;
+    if (markers.secondHalfStart !== undefined && safeTime >= markers.secondHalfStart) {
+      detectedHalf = '2ª Parte';
+    } else if (markers.firstHalfStart !== undefined && safeTime >= markers.firstHalfStart) {
+      detectedHalf = '1ª Parte';
+    }
+
     const freezeEvent: ClipEvent = {
       id: `ev-pint-${Date.now()}`,
-      name: `Pintado Táctico (${insertFreezeSeconds} s)`,
+      name: `Pintado Táctico (${freezeSecs} s)`,
       category: 'Pizarra Táctica',
       color: strokeColor || '#cc2016',
-      startTime: Math.max(0, currentTime - 1.5),
-      endTime: currentTime + 1.5,
+      startTime: Math.max(0, Number((safeTime - 1.5).toFixed(1))),
+      endTime: Number((safeTime + 1.5).toFixed(1)),
       videoId: activeVideo?.id || 'sin-video',
       videoName: activeVideo?.name || 'Visor',
       team: 'Séneca CF',
+      half: detectedHalf,
+      zone: selectedPitchZone,
+      descriptors: ['Éxito / Positivo'],
       drawingDataUrl: dataUrl,
       isFreezeInsert: true,
-      freezeTimestamp: currentTime,
-      freezeDuration: insertFreezeSeconds,
+      freezeTimestamp: safeTime,
+      freezeDuration: freezeSecs,
       createdAt: new Date().toISOString(),
     };
 
     const nextEvents = [...events, freezeEvent];
     setEvents(nextEvents);
-    pushHistory({ events: nextEvents, captures: nextCaps });
-    notify(`Pintado insertado en la línea de tiempo (${insertFreezeSeconds} s) y añadido a Eventos`);
+    setSelectedEventId(freezeEvent.id);
+    setDrawingMode(false);
+    pushHistory({ events: nextEvents, captures: nextCaps, drawings: updatedDrawings });
+
+    // Mostrar el fotograma táctico insertado sobre el visor durante los segundos configurados
+    triggeredFreezeIdsRef.current.add(freezeEvent.id);
+    setActiveFreezeOverlay({
+      eventId: freezeEvent.id,
+      dataUrl,
+      remaining: freezeSecs,
+      total: freezeSecs,
+      resumeAfter: false,
+    });
+
+    notify(`Pintado insertado en el vídeo (${freezeSecs} s) y guardado en Eventos y Capturas`);
   };
 
   const handleFilesSelected = (fileList: FileList | null) => {
@@ -1107,10 +1315,24 @@ export default function App() {
   };
 
   const togglePlay = () => {
-    if (!videoRef.current || !activeVideo) return;
+    if (!videoRef.current || !activeVideo) {
+      if (activeFreezeOverlay) setActiveFreezeOverlay(null);
+      return;
+    }
+    if (activeFreezeOverlay) {
+      setActiveFreezeOverlay(null);
+      videoRef.current.currentTime = Math.min(
+        duration || 99999,
+        videoRef.current.currentTime + 0.25
+      );
+      setDrawingMode(false);
+      videoRef.current.play().catch(() => {});
+      setIsPlaying(true);
+      return;
+    }
     if (videoRef.current.paused) {
       setDrawingMode(false);
-      videoRef.current.play();
+      videoRef.current.play().catch(() => {});
       setIsPlaying(true);
     } else {
       videoRef.current.pause();
@@ -1119,6 +1341,7 @@ export default function App() {
   };
 
   const skipSeconds = (delta: number) => {
+    if (activeFreezeOverlay) setActiveFreezeOverlay(null);
     if (!videoRef.current || !activeVideo) return;
     const nextTime = Math.max(0, Math.min(duration || 99999, videoRef.current.currentTime + delta));
     videoRef.current.currentTime = nextTime;
@@ -1948,6 +2171,23 @@ ${xmlInstances}
                       />
                     )}
 
+                    {/* Fotograma de Pizarra Táctica insertado en el vídeo (pausa activa o evento seleccionado) */}
+                    {(activeFreezeOverlay?.dataUrl ||
+                      (!drawingMode &&
+                        !isPlaying &&
+                        currentPlayingEvent?.isFreezeInsert &&
+                        currentPlayingEvent?.drawingDataUrl &&
+                        drawings.length === 0)) && (
+                      <img
+                        src={activeFreezeOverlay?.dataUrl || currentPlayingEvent?.drawingDataUrl}
+                        alt="Pintado Táctico Insertado"
+                        onClick={() => {
+                          if (!drawingMode) togglePlay();
+                        }}
+                        className="absolute inset-0 w-full h-full object-contain z-10 cursor-pointer"
+                      />
+                    )}
+
                     {/* Canvas para PINTADO DE ACCIONES + KLIPDRAW */}
                     <canvas
                       ref={overlayCanvasRef}
@@ -1958,6 +2198,8 @@ ${xmlInstances}
                       onMouseUp={handleCanvasMouseUp}
                       onDoubleClick={handleCanvasDoubleClick}
                       className={`absolute inset-0 w-full h-full object-contain z-20 ${
+                        activeFreezeOverlay && !drawingMode ? 'opacity-0 pointer-events-none' : ''
+                      } ${
                         drawingMode
                           ? isMoveMode
                             ? 'cursor-move pointer-events-auto'
@@ -1966,6 +2208,46 @@ ${xmlInstances}
                       }`}
                     />
                   </div>
+
+                  {/* Indicador de Pausa Táctica Insertada en el Vídeo */}
+                  {activeFreezeOverlay && (
+                    <div className="absolute top-3 left-3 z-30 flex items-center gap-2.5 bg-[#15181d]/95 border-l-4 border-[#cc2016] text-white px-3 py-1.5 shadow-lg">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#f5b800] animate-ping" />
+                      <div className="flex flex-col">
+                        <span className="font-condensed font-bold text-xs uppercase tracking-wider text-[#f5b800]">
+                          PIZARRA TÁCTICA EN VÍDEO · {activeFreezeOverlay.remaining.toFixed(1)} s
+                        </span>
+                        <div className="w-36 h-1 bg-gray-700 rounded overflow-hidden mt-0.5">
+                          <div
+                            className="h-full bg-[#cc2016] transition-all duration-100"
+                            style={{
+                              width: `${Math.max(
+                                0,
+                                Math.min(100, (activeFreezeOverlay.remaining / activeFreezeOverlay.total) * 100)
+                              )}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          const shouldResume = activeFreezeOverlay.resumeAfter;
+                          setActiveFreezeOverlay(null);
+                          if (shouldResume && videoRef.current && activeVideo) {
+                            videoRef.current.currentTime = Math.min(
+                              duration || 99999,
+                              videoRef.current.currentTime + 0.25
+                            );
+                            videoRef.current.play().catch(() => {});
+                            setIsPlaying(true);
+                          }
+                        }}
+                        className="ml-1 px-2 py-0.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-[11px] uppercase rounded-sm transition"
+                      >
+                        Continuar
+                      </button>
+                    </div>
+                  )}
 
                   {/* Rótulo Televisivo Superior Derecho cuando el vídeo pasa por una acción */}
                   {currentPlayingEvent && (
