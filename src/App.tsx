@@ -95,6 +95,26 @@ interface HistorySnapshot {
   markers: MatchMarkers;
 }
 
+// Limpia eventos antiguos donde se asignaba por defecto '9. Delantero Centro' y 'Éxito / Positivo' sin que el usuario lo hubiera marcado
+function sanitizeLoadedEvents(rawEvents: unknown): ClipEvent[] {
+  if (!Array.isArray(rawEvents)) return [];
+  return rawEvents.map((ev: ClipEvent) => {
+    if (!ev || typeof ev !== 'object') return ev;
+    if (ev.userClassified || String(ev.id || '').startsWith('ev-demo-')) {
+      return ev;
+    }
+    const cleanedPlayer = ev.player === '9. Delantero Centro' ? undefined : ev.player;
+    const cleanedDescriptors = Array.isArray(ev.descriptors)
+      ? ev.descriptors.filter((d) => d !== 'Éxito / Positivo')
+      : [];
+    return {
+      ...ev,
+      player: cleanedPlayer,
+      descriptors: cleanedDescriptors,
+    };
+  });
+}
+
 export default function App() {
   // Navegación principal (todos desbloqueados gratuitamente)
   const [activeTab, setActiveTab] = useState<'editor' | 'con_video' | 'sin_video'>('editor');
@@ -109,6 +129,7 @@ export default function App() {
   const [showSqlModal, setShowSqlModal] = useState<boolean>(false);
   const [showTutorialModal, setShowTutorialModal] = useState<boolean>(false);
   const [showMatrixModal, setShowMatrixModal] = useState<boolean>(false);
+  const [matrixViewMode, setMatrixViewMode] = useState<'completa' | 'posiciones' | 'categorias' | 'cruce'>('completa');
   const [supabaseStatus, setSupabaseStatus] = useState<'synced' | 'syncing' | 'local_only'>('syncing');
   const [statusMessage, setStatusMessage] = useState<string>('');
 
@@ -218,7 +239,7 @@ export default function App() {
   const [newClipCategory, setNewClipCategory] = useState<string>('Salida de Balón');
   const [newClipTeam, setNewClipTeam] = useState<'Séneca CF' | 'Rival'>('Séneca CF');
   const [newClipPlayer, setNewClipPlayer] = useState<string>('');
-  const [newClipDescriptors, setNewClipDescriptors] = useState<string[]>(['Éxito / Positivo']);
+  const [newClipDescriptors, setNewClipDescriptors] = useState<string[]>([]);
   const [newClipNotes, setNewClipNotes] = useState<string>('');
 
   // Datos de análisis (Eventos, Capturas, Pintado, Marcadores de partido, Categorías, Listas de Presentación)
@@ -311,14 +332,14 @@ export default function App() {
   const [newPlayerDorsal, setNewPlayerDorsal] = useState<string>('');
   const [newPlayerName, setNewPlayerName] = useState<string>('');
 
-  // Estado específico para "REGISTRO SIN VÍDEO" y Descriptores Nacsport
+  // Estado específico para "REGISTRO SIN VÍDEO" y Descriptores Nacsport (por defecto sin posición ni resultado marcado)
   const [liveTimerRunning, setLiveTimerRunning] = useState<boolean>(false);
   const [liveTimerSeconds, setLiveTimerSeconds] = useState<number>(0);
   const [liveHalf, setLiveHalf] = useState<'1ª Parte' | '2ª Parte'>('1ª Parte');
   const [selectedPitchZone, setSelectedPitchZone] = useState<string>('Zona Media Centro');
   const [selectedTeamFilter, setSelectedTeamFilter] = useState<'Séneca CF' | 'Rival'>('Séneca CF');
   const [selectedPlayerTag, setSelectedPlayerTag] = useState<string>('');
-  const [activeDescriptors, setActiveDescriptors] = useState<string[]>(['Éxito / Positivo']);
+  const [activeDescriptors, setActiveDescriptors] = useState<string[]>([]);
 
   // PWA Install Prompt
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -391,7 +412,7 @@ export default function App() {
         setProjectName(parsed.name || 'Jornada 1 - Séneca CF vs Rival');
         setRivalName(parsed.rival || 'Rival FC');
         setCompetition(parsed.competition || 'División de Honor');
-        setEvents(Array.isArray(parsed.events) ? parsed.events : []);
+        setEvents(sanitizeLoadedEvents(parsed.events));
         setCaptures(Array.isArray(parsed.captures) ? parsed.captures : []);
         setDrawings(Array.isArray(parsed.drawings) ? parsed.drawings : []);
         setMarkers(parsed.markers || {});
@@ -438,7 +459,7 @@ export default function App() {
             setProjectName(latest.name);
             setRivalName(latest.rival || 'Rival FC');
             setCompetition(latest.competition || 'División de Honor');
-            setEvents(latest.events || []);
+            setEvents(sanitizeLoadedEvents(latest.events));
             setCaptures(latest.captures || []);
             setDrawings(latest.drawings || []);
             setMarkers(latest.markers || {});
@@ -1507,9 +1528,11 @@ export default function App() {
       videoId: activeVideo?.id || 'sin-video',
       videoName: activeVideo?.name || 'Visor',
       team: 'Séneca CF',
+      player: selectedPlayerTag || undefined,
       half: detectedHalf,
       zone: selectedPitchZone,
-      descriptors: ['Éxito / Positivo'],
+      descriptors: activeDescriptors,
+      userClassified: Boolean(selectedPlayerTag || activeDescriptors.length > 0),
       notes: isStill ? 'IMAGEN_PARADA' : 'VIDEO_CORRIENDO_TRACKING',
       drawingDataUrl: dataUrl,
       isFreezeInsert: isStill,
@@ -1623,6 +1646,7 @@ export default function App() {
             zone: 'Zona Central Defensiva',
             half: '1ª Parte',
             descriptors: ['Éxito / Positivo', 'Supera Líneas'],
+            userClassified: true,
             createdAt: new Date().toISOString(),
           },
           {
@@ -1639,6 +1663,7 @@ export default function App() {
             zone: 'Zona Media Centro',
             half: '1ª Parte',
             descriptors: ['Duelo Ganado', 'Progresión'],
+            userClassified: true,
             createdAt: new Date().toISOString(),
           },
           {
@@ -1655,6 +1680,7 @@ export default function App() {
             zone: 'Carril Der. Ofensivo',
             half: '2ª Parte',
             descriptors: ['Progresión', 'Centro Lateral'],
+            userClassified: true,
             createdAt: new Date().toISOString(),
           },
           {
@@ -1671,6 +1697,7 @@ export default function App() {
             zone: 'Zona Central Ofensiva (Área)',
             half: '2ª Parte',
             descriptors: ['Éxito / Positivo', 'Remate a Puerta'],
+            userClassified: true,
             createdAt: new Date().toISOString(),
           },
         ];
@@ -1759,8 +1786,9 @@ export default function App() {
 
   const allAvailablePlayers = useMemo(() => {
     const fromRoster = rosterPlayers.map((rp) => `${rp.dorsal}. ${rp.name}`);
-    return Array.from(new Set([...SENECA_PLAYERS, ...fromRoster]));
-  }, [rosterPlayers]);
+    const fromEvents = events.map((e) => e.player).filter((p): p is string => Boolean(p && p.trim()));
+    return Array.from(new Set([...SENECA_PLAYERS, ...fromRoster, ...fromEvents]));
+  }, [rosterPlayers, events]);
 
   const getClipOutcome = useCallback((descriptors?: string[]): 'positivo' | 'negativo' | 'neutro' => {
     const list = descriptors || [];
@@ -1788,7 +1816,9 @@ export default function App() {
 
   const updateExistingClip = useCallback(
     (clipId: string, patch: Partial<ClipEvent>) => {
-      const updated = events.map((ev) => (ev.id === clipId ? { ...ev, ...patch } : ev));
+      const updated = events.map((ev) =>
+        ev.id === clipId ? { ...ev, ...patch, userClassified: true } : ev
+      );
       setEvents(updated);
       pushHistory({ events: updated });
     },
@@ -1864,6 +1894,7 @@ export default function App() {
               zone: selectedPitchZone,
               half: detectedHalf,
               descriptors: newClipDescriptors,
+              userClassified: true,
               notes: newClipNotes.trim() || undefined,
             }
           : ev
@@ -1874,7 +1905,13 @@ export default function App() {
       setEditingClipId(null);
       setPendingClipRange(null);
       setNewClipNotes('');
-      notify(`Acción actualizada: ${newClipPlayer.trim() || newClipTeam}`);
+      const outLabel =
+        getClipOutcome(newClipDescriptors) === 'positivo'
+          ? 'Con Éxito / Acierto'
+          : getClipOutcome(newClipDescriptors) === 'negativo'
+          ? 'Negativo / No acertada'
+          : 'Sin marcar';
+      notify(`Acción actualizada (${newClipPlayer.trim() || 'Sin posición'} · ${outLabel})`);
       return;
     }
 
@@ -1892,6 +1929,7 @@ export default function App() {
       zone: selectedPitchZone,
       half: detectedHalf,
       descriptors: newClipDescriptors,
+      userClassified: true,
       notes: newClipNotes.trim() || undefined,
       createdAt: new Date().toISOString(),
     };
@@ -1905,11 +1943,11 @@ export default function App() {
     setNewClipNotes('');
     const outLabel =
       getClipOutcome(newClip.descriptors) === 'positivo'
-        ? 'Positivo'
+        ? 'Con Éxito / Acierto'
         : getClipOutcome(newClip.descriptors) === 'negativo'
-        ? 'Negativo'
-        : 'Neutro';
-    notify(`Acción "${newClip.name}" guardada (${newClip.player || newClip.team} · ${outLabel})`);
+        ? 'Negativo / No acertada'
+        : 'Sin marcar';
+    notify(`Acción "${newClip.name}" guardada (${newClip.player || 'Sin posición'} · ${outLabel})`);
   };
 
   const handleQuickCategoryTag = (cat: TagCategory) => {
@@ -2319,7 +2357,8 @@ export default function App() {
       'Evento',
       'Categoria',
       'Equipo',
-      'Jugador',
+      'Posicion_Jugador',
+      'Resultado_Acierto',
       'Zona',
       'Periodo',
       'Descriptores',
@@ -2328,30 +2367,65 @@ export default function App() {
       'Duracion_Seg',
       'Notas',
     ];
-    const rows = targetClips.map((ev, idx) => [
-      idx + 1,
-      `"${ev.name.replace(/"/g, '""')}"`,
-      `"${ev.category}"`,
-      `"${ev.team}"`,
-      `"${ev.player || ''}"`,
-      `"${ev.zone || ''}"`,
-      `"${ev.half || ''}"`,
-      `"${(ev.descriptors || []).join(', ')}"`,
-      ev.startTime.toFixed(1),
-      ev.endTime.toFixed(1),
-      (ev.endTime - ev.startTime).toFixed(1),
-      `"${(ev.notes || '').replace(/"/g, '""')}"`,
-    ]);
+    const rows = targetClips.map((ev, idx) => {
+      const out = getClipOutcome(ev.descriptors);
+      const outText =
+        out === 'positivo'
+          ? 'Con Acierto (Éxito)'
+          : out === 'negativo'
+          ? 'No Acertada (Negativo)'
+          : 'Sin marcar';
+      return [
+        idx + 1,
+        `"${ev.name.replace(/"/g, '""')}"`,
+        `"${ev.category}"`,
+        `"${ev.team}"`,
+        `"${ev.player || 'Sin posición marcada'}"`,
+        `"${outText}"`,
+        `"${ev.zone || ''}"`,
+        `"${ev.half || ''}"`,
+        `"${(ev.descriptors || []).join(', ')}"`,
+        ev.startTime.toFixed(1),
+        ev.endTime.toFixed(1),
+        (ev.endTime - ev.startTime).toFixed(1),
+        `"${(ev.notes || '').replace(/"/g, '""')}"`,
+      ];
+    });
+
+    const posHeaders = [
+      'MATRIZ_POSICION',
+      'Con_Acierto_Exito',
+      'No_Acertadas_Negativo',
+      'Sin_Marcar',
+      'Porcentaje_Acierto',
+      'Total_Acciones',
+    ];
+    const posRows = allAvailablePlayers.map((pos) => {
+      const pClips = targetClips.filter((e) => e.player === pos);
+      const ok = pClips.filter((e) => getClipOutcome(e.descriptors) === 'positivo').length;
+      const fail = pClips.filter((e) => getClipOutcome(e.descriptors) === 'negativo').length;
+      const neu = pClips.length - ok - fail;
+      const pct = ok + fail > 0 ? `${Math.round((ok / (ok + fail)) * 100)}%` : '-';
+      return [`"${pos}"`, ok, fail, neu, `"${pct}"`, pClips.length];
+    });
+
     const csvContent =
-      'data:text/csv;charset=utf-8,\uFEFF' + [headers.join(';'), ...rows.map((r) => r.join(';'))].join('\n');
+      'data:text/csv;charset=utf-8,\uFEFF' +
+      [
+        headers.join(';'),
+        ...rows.map((r) => r.join(';')),
+        '',
+        posHeaders.join(';'),
+        ...posRows.map((r) => r.join(';')),
+      ].join('\n');
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
     link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `${baseName}_Eventos.csv`);
+    link.setAttribute('download', `${baseName}_Matriz_Eventos_y_Posiciones.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    notify('Matriz de datos CSV descargada para Excel / Nacsport');
+    notify('Matriz de datos CSV (con posiciones y aciertos/no acertadas) descargada');
   };
 
   const exportEventsToNacsportXML = () => {
@@ -2878,42 +2952,109 @@ ${xmlInstances}
 
                   {/* Rótulo Televisivo Superior Derecho cuando el vídeo pasa por una acción */}
                   {currentPlayingEvent && (
-                    <div className="absolute top-3 right-3 z-30 flex items-stretch shadow-lg overflow-hidden border border-black/40">
-                      <div className="bg-[#15181d] text-white font-condensed font-bold text-base px-3 py-1.5 flex items-center pointer-events-none">
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute top-3 right-3 z-30 flex items-stretch shadow-lg overflow-hidden border border-black/40 pointer-events-auto"
+                    >
+                      <div className="bg-[#15181d] text-white font-condensed font-bold text-base px-3 py-1.5 flex items-center">
                         {activeMatchPeriodInfo
                           ? `${activeMatchPeriodInfo.periodLabel} · ${activeMatchPeriodInfo.matchClock}`
                           : formatTimecode(currentPlayingEvent.startTime, false)}
                       </div>
                       <div
                         style={{ backgroundColor: currentPlayingEvent.color || '#cc2016' }}
-                        className="text-white font-condensed font-bold text-base uppercase px-3.5 py-1.5 flex items-center tracking-wide pointer-events-none"
+                        className="text-white font-condensed font-bold text-base uppercase px-3.5 py-1.5 flex items-center tracking-wide"
                       >
                         {currentPlayingEvent.category}
                       </div>
-                      <div className="bg-white/95 text-[#15181d] px-3 py-1 flex flex-col justify-center">
+                      <div className="bg-white/95 text-[#15181d] px-3 py-1.5 flex flex-col justify-center gap-1">
                         <div className="flex items-center gap-1.5">
                           <b className="text-xs font-bold leading-tight">
                             {currentPlayingEvent.name} ({currentPlayingEvent.team})
                           </b>
                           {getClipOutcome(currentPlayingEvent.descriptors) === 'positivo' && (
                             <span className="px-1.5 py-0.2 bg-emerald-600 text-white text-[10px] font-condensed font-bold uppercase rounded-sm">
-                              ✓ POSITIVO
+                              ✓ CON ÉXITO / ACIERTO
                             </span>
                           )}
                           {getClipOutcome(currentPlayingEvent.descriptors) === 'negativo' && (
-                            <span className="px-1.5 py-0.2 bg-red-600 text-white text-[10px] font-condensed font-bold uppercase rounded-sm">
-                              ✕ NEGATIVO
+                            <span className="px-1.5 py-0.2 bg-[#cc2016] text-white text-[10px] font-condensed font-bold uppercase rounded-sm">
+                              ✕ NEGATIVO / NO ACERTADA
                             </span>
                           )}
                         </div>
-                        <span className="text-[10.5px] text-gray-600 leading-tight">
-                          {[
-                            currentPlayingEvent.player || 'Sin jugador específico',
-                            ...(currentPlayingEvent.descriptors || []),
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </span>
+
+                        {/* Solo muestra texto resumen si el usuario ha marcado posición o descriptores */}
+                        {(currentPlayingEvent.player || (currentPlayingEvent.descriptors || []).length > 0) && (
+                          <span className="text-[10.5px] text-gray-700 font-medium leading-tight">
+                            {[currentPlayingEvent.player, ...(currentPlayingEvent.descriptors || [])]
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </span>
+                        )}
+
+                        {/* Controles rápidos directos en el rótulo para marcar Posición y Éxito / Negativo */}
+                        <div className="flex items-center gap-1 pt-0.5">
+                          <select
+                            value={currentPlayingEvent.player || ''}
+                            onChange={(e) =>
+                              updateExistingClip(currentPlayingEvent.id, {
+                                player: e.target.value || undefined,
+                              })
+                            }
+                            className="border border-gray-300 rounded px-1.5 py-0.5 text-[10.5px] bg-white text-gray-800 font-medium focus:outline-none focus:border-[#cc2016]"
+                            title="Seleccionar posición para esta acción"
+                          >
+                            <option value="">-- Marcar posición --</option>
+                            {allAvailablePlayers.map((p) => (
+                              <option key={p} value={p}>
+                                {p}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const currentOut = getClipOutcome(currentPlayingEvent.descriptors);
+                              updateExistingClip(currentPlayingEvent.id, {
+                                descriptors: applyOutcomeToDescriptors(
+                                  currentPlayingEvent.descriptors,
+                                  currentOut === 'positivo' ? 'neutro' : 'positivo'
+                                ),
+                              });
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
+                              getClipOutcome(currentPlayingEvent.descriptors) === 'positivo'
+                                ? 'bg-emerald-600 text-white border-emerald-700'
+                                : 'bg-white text-emerald-700 border-gray-300 hover:bg-emerald-50'
+                            }`}
+                            title="Marcar si ha sido con éxito / acierto (clic de nuevo para quitar)"
+                          >
+                            ✓ Éxito
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const currentOut = getClipOutcome(currentPlayingEvent.descriptors);
+                              updateExistingClip(currentPlayingEvent.id, {
+                                descriptors: applyOutcomeToDescriptors(
+                                  currentPlayingEvent.descriptors,
+                                  currentOut === 'negativo' ? 'neutro' : 'negativo'
+                                ),
+                              });
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
+                              getClipOutcome(currentPlayingEvent.descriptors) === 'negativo'
+                                ? 'bg-[#cc2016] text-white border-red-800'
+                                : 'bg-white text-red-700 border-gray-300 hover:bg-red-50'
+                            }`}
+                            title="Marcar si ha sido negativo / no acertada (clic de nuevo para quitar)"
+                          >
+                            ✕ Negativo
+                          </button>
+                        </div>
                       </div>
                       <button
                         onClick={(e) => {
@@ -2921,7 +3062,7 @@ ${xmlInstances}
                           openEditClipModal(currentPlayingEvent);
                         }}
                         className="bg-[#15181d] hover:bg-[#cc2016] text-[#f5b800] hover:text-white px-2.5 flex items-center gap-1 font-condensed font-bold text-[11px] uppercase transition pointer-events-auto border-l border-white/15"
-                        title="Cambiar quién lo ha hecho y si ha sido positivo o negativo"
+                        title="Abrir ventana para clasificar posición y si ha sido con éxito o negativo"
                       >
                         <Pencil className="w-3 h-3" />
                         <span>Editar</span>
@@ -3089,7 +3230,7 @@ ${xmlInstances}
                     <div className="flex items-center gap-2">
                       <span className="w-2.5 h-2.5 bg-[#cc2016] inline-block"></span>
                       <span className="font-condensed font-bold text-sm uppercase tracking-wider">
-                        PANEL DE CODIFICACIÓN NACSPORT (CATEGORÍAS + DESCRIPTORES SECUNDARIOS)
+                        PANEL DE CODIFICACIÓN NACSPORT (POSICIÓN + ÉXITO / NEGATIVO + CATEGORÍAS)
                       </span>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5 text-xs">
@@ -3116,15 +3257,51 @@ ${xmlInstances}
                       <select
                         value={selectedPlayerTag}
                         onChange={(e) => setSelectedPlayerTag(e.target.value)}
-                        className="border border-gray-300 rounded px-2 py-1 bg-white text-xs"
+                        className="border border-gray-300 rounded px-2 py-1 bg-white text-xs font-medium"
                       >
-                        <option value="">-- Jugador --</option>
-                        {SENECA_PLAYERS.map((p) => (
+                        <option value="">-- Sin marcar posición --</option>
+                        {allAvailablePlayers.map((p) => (
                           <option key={p} value={p}>
                             {p}
                           </option>
                         ))}
                       </select>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setActiveDescriptors((prev) =>
+                            getClipOutcome(prev) === 'positivo'
+                              ? applyOutcomeToDescriptors(prev, 'neutro')
+                              : applyOutcomeToDescriptors(prev, 'positivo')
+                          )
+                        }
+                        className={`px-2.5 py-1 rounded font-condensed font-bold uppercase border transition ${
+                          getClipOutcome(activeDescriptors) === 'positivo'
+                            ? 'bg-emerald-600 text-white border-emerald-700'
+                            : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+                        }`}
+                      >
+                        ✓ Con Éxito / Acierto
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setActiveDescriptors((prev) =>
+                            getClipOutcome(prev) === 'negativo'
+                              ? applyOutcomeToDescriptors(prev, 'neutro')
+                              : applyOutcomeToDescriptors(prev, 'negativo')
+                          )
+                        }
+                        className={`px-2.5 py-1 rounded font-condensed font-bold uppercase border transition ${
+                          getClipOutcome(activeDescriptors) === 'negativo'
+                            ? 'bg-[#cc2016] text-white border-red-800'
+                            : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
+                        }`}
+                      >
+                        ✕ Negativo / No Acertada
+                      </button>
+
                       <select
                         value={selectedPitchZone}
                         onChange={(e) => setSelectedPitchZone(e.target.value)}
@@ -3152,9 +3329,11 @@ ${xmlInstances}
                   {/* Descriptores secundarios seleccionables estilo Nacsport */}
                   <div className="flex flex-wrap items-center gap-1">
                     <span className="text-[11px] font-condensed font-bold uppercase text-gray-500 mr-1">
-                      Descriptores:
+                      Descriptores extra:
                     </span>
-                    {NACSPORT_DESCRIPTORS.map((desc) => {
+                    {NACSPORT_DESCRIPTORS.filter(
+                      (d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo'
+                    ).map((desc) => {
                       const isOn = activeDescriptors.includes(desc);
                       return (
                         <button
@@ -3303,7 +3482,7 @@ ${xmlInstances}
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <span className="font-condensed font-bold text-sm uppercase flex items-center gap-1.5">
                         <Users className="w-4 h-4 text-[#cc2016]" />
-                        2. Equipo, Jugador y Descriptores Nacsport:
+                        2. Equipo, Posición y si es con Éxito (Acierto) o Negativo:
                       </span>
                       <div className="flex items-center gap-1.5">
                         <button
@@ -3330,10 +3509,23 @@ ${xmlInstances}
                     </div>
 
                     <div className="flex flex-wrap gap-1 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPlayerTag('')}
+                        className={`px-2 py-1 text-[11px] rounded border transition ${
+                          selectedPlayerTag === ''
+                            ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
+                            : 'bg-gray-100 text-gray-700 border-gray-300 hover:bg-gray-200'
+                        }`}
+                      >
+                        Sin posición marcada
+                      </button>
                       {SENECA_PLAYERS.map((player) => (
                         <button
                           key={player}
-                          onClick={() => setSelectedPlayerTag(player)}
+                          onClick={() =>
+                            setSelectedPlayerTag((prev) => (prev === player ? '' : player))
+                          }
                           className={`px-2 py-1 text-[11px] rounded border transition ${
                             selectedPlayerTag === player
                               ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
@@ -3345,8 +3537,45 @@ ${xmlInstances}
                       ))}
                     </div>
 
-                    <div className="flex flex-wrap gap-1 mb-2.5">
-                      {NACSPORT_DESCRIPTORS.map((desc) => {
+                    <div className="flex flex-wrap items-center gap-1.5 mb-2.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setActiveDescriptors((prev) =>
+                            getClipOutcome(prev) === 'positivo'
+                              ? applyOutcomeToDescriptors(prev, 'neutro')
+                              : applyOutcomeToDescriptors(prev, 'positivo')
+                          )
+                        }
+                        className={`px-2.5 py-1 text-[11px] rounded border font-condensed font-bold uppercase transition ${
+                          getClipOutcome(activeDescriptors) === 'positivo'
+                            ? 'bg-emerald-600 text-white border-emerald-700'
+                            : 'bg-white text-emerald-700 border-emerald-300 hover:bg-emerald-50'
+                        }`}
+                      >
+                        ✓ Con Éxito / Acierto
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setActiveDescriptors((prev) =>
+                            getClipOutcome(prev) === 'negativo'
+                              ? applyOutcomeToDescriptors(prev, 'neutro')
+                              : applyOutcomeToDescriptors(prev, 'negativo')
+                          )
+                        }
+                        className={`px-2.5 py-1 text-[11px] rounded border font-condensed font-bold uppercase transition ${
+                          getClipOutcome(activeDescriptors) === 'negativo'
+                            ? 'bg-[#cc2016] text-white border-red-800'
+                            : 'bg-white text-red-700 border-red-300 hover:bg-red-50'
+                        }`}
+                      >
+                        ✕ Negativo / No Acertada
+                      </button>
+
+                      {NACSPORT_DESCRIPTORS.filter(
+                        (d) => d !== 'Éxito / Positivo' && d !== 'Pérdida / Fallo'
+                      ).map((desc) => {
                         const isOn = activeDescriptors.includes(desc);
                         return (
                           <button
@@ -3358,7 +3587,7 @@ ${xmlInstances}
                             }
                             className={`px-2 py-0.5 text-[10.5px] rounded border transition ${
                               isOn
-                                ? 'bg-[#cc2016] text-white border-[#cc2016] font-semibold'
+                                ? 'bg-[#15181d] text-[#f5b800] border-[#15181d] font-semibold'
                                 : 'bg-gray-50 text-gray-600 border-gray-300'
                             }`}
                           >
@@ -4033,16 +4262,21 @@ ${xmlInstances}
                       </button>
                     </div>
 
-                    {/* 1. ¿HA SIDO POSITIVO O NEGATIVO? */}
+                    {/* 1. ¿CON ÉXITO / ACIERTO O NEGATIVO / NO ACERTADA? */}
                     <div className="mb-3.5 bg-gray-50 p-3 rounded border border-gray-200">
                       <label className="block font-condensed font-bold text-xs uppercase text-gray-800 mb-2">
-                        1. ¿HA SIDO POSITIVO O NEGATIVO? (RESULTADO DE LA ACCIÓN)
+                        1. ¿HA SIDO CON ÉXITO (ACIERTO) O NEGATIVO (NO ACERTADA)?
                       </label>
                       <div className="grid grid-cols-3 gap-2">
                         <button
                           type="button"
                           onClick={() =>
-                            setNewClipDescriptors((prev) => applyOutcomeToDescriptors(prev, 'positivo'))
+                            setNewClipDescriptors((prev) =>
+                              applyOutcomeToDescriptors(
+                                prev,
+                                getClipOutcome(prev) === 'positivo' ? 'neutro' : 'positivo'
+                              )
+                            )
                           }
                           className={`py-2.5 px-3 rounded font-condensed font-bold text-sm uppercase flex items-center justify-center gap-1.5 border-2 transition shadow-sm ${
                             getClipOutcome(newClipDescriptors) === 'positivo'
@@ -4051,13 +4285,18 @@ ${xmlInstances}
                           }`}
                         >
                           <Check className="w-4 h-4 stroke-[3]" />
-                          <span>POSITIVO / ÉXITO</span>
+                          <span>CON ÉXITO / ACIERTO</span>
                         </button>
 
                         <button
                           type="button"
                           onClick={() =>
-                            setNewClipDescriptors((prev) => applyOutcomeToDescriptors(prev, 'negativo'))
+                            setNewClipDescriptors((prev) =>
+                              applyOutcomeToDescriptors(
+                                prev,
+                                getClipOutcome(prev) === 'negativo' ? 'neutro' : 'negativo'
+                              )
+                            )
                           }
                           className={`py-2.5 px-3 rounded font-condensed font-bold text-sm uppercase flex items-center justify-center gap-1.5 border-2 transition shadow-sm ${
                             getClipOutcome(newClipDescriptors) === 'negativo'
@@ -4066,7 +4305,7 @@ ${xmlInstances}
                           }`}
                         >
                           <X className="w-4 h-4 stroke-[3]" />
-                          <span>NEGATIVO / FALLO</span>
+                          <span>NEGATIVO / NO ACERTADA</span>
                         </button>
 
                         <button
@@ -4080,16 +4319,16 @@ ${xmlInstances}
                               : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-100'
                           }`}
                         >
-                          <span>➖ NEUTRO / SIN MARCAR</span>
+                          <span>➖ SIN MARCAR</span>
                         </button>
                       </div>
                     </div>
 
-                    {/* 2. ¿QUIÉN LO HA HECHO? (EQUIPO Y JUGADOR / DORSAL) */}
+                    {/* 2. POSICIÓN / JUGADOR Y EQUIPO */}
                     <div className="mb-3.5 bg-gray-50 p-3 rounded border border-gray-200">
                       <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                         <label className="font-condensed font-bold text-xs uppercase text-gray-800">
-                          2. ¿QUIÉN LO HA HECHO? (EQUIPO Y JUGADOR / DORSAL)
+                          2. POSICIÓN / DEMARCACIÓN Y EQUIPO (SOLO SE MUESTRA SI LO MARCAS)
                         </label>
                         <div className="flex items-center gap-1.5">
                           <button
@@ -4122,12 +4361,12 @@ ${xmlInstances}
                           type="text"
                           value={newClipPlayer}
                           onChange={(e) => setNewClipPlayer(e.target.value)}
-                          placeholder="Escribe aquí el nombre o dorsal de quien lo ha hecho (ej: 7. Juanlu, 9. Carlos...) o elige abajo"
+                          placeholder="Sin posición marcada (elige una posición abajo o escribe dorsal/nombre)"
                           className="w-full border border-gray-300 px-2.5 py-1.5 text-xs rounded bg-white focus:outline-none focus:border-[#cc2016] font-medium"
                         />
                       </div>
 
-                      <div className="flex flex-wrap gap-1 max-h-[120px] overflow-y-auto">
+                      <div className="flex flex-wrap gap-1 max-h-[135px] overflow-y-auto">
                         <button
                           type="button"
                           onClick={() => setNewClipPlayer('')}
@@ -4137,13 +4376,13 @@ ${xmlInstances}
                               : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
                           }`}
                         >
-                          Equipo / Colectivo (Sin jugador)
+                          Sin marcar posición
                         </button>
                         {allAvailablePlayers.map((p) => (
                           <button
                             key={p}
                             type="button"
-                            onClick={() => setNewClipPlayer(p)}
+                            onClick={() => setNewClipPlayer((prev) => (prev === p ? '' : p))}
                             className={`px-2 py-1 text-[11px] rounded border transition ${
                               newClipPlayer === p
                                 ? 'bg-[#141414] text-[#f5b800] border-[#141414] font-bold'
@@ -4264,99 +4503,109 @@ ${xmlInstances}
                 </span>
               </div>
 
-              {selectedEvent ? (
-                <div className="flex flex-wrap items-center gap-1.5 text-xs bg-white px-2.5 py-1 border border-gray-300 rounded shadow-sm">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full inline-block shrink-0"
-                    style={{ backgroundColor: selectedEvent.color }}
-                  />
-                  <strong className="text-gray-900">{selectedEvent.name}</strong>
-                  <span className="text-gray-500 text-[11px]">
-                    ({formatTimecode(selectedEvent.startTime)} - {formatTimecode(selectedEvent.endTime)})
-                  </span>
+              {(selectedEvent || currentPlayingEvent) ? (() => {
+                const activeEv = selectedEvent || currentPlayingEvent!;
+                const activeOutcome = getClipOutcome(activeEv.descriptors);
+                return (
+                  <div className="flex flex-wrap items-center gap-1.5 text-xs bg-white px-2.5 py-1 border border-gray-300 rounded shadow-sm">
+                    <span
+                      className="w-2.5 h-2.5 rounded-full inline-block shrink-0"
+                      style={{ backgroundColor: activeEv.color }}
+                    />
+                    <strong className="text-gray-900">{activeEv.name}</strong>
+                    <span className="text-gray-500 text-[11px]">
+                      ({formatTimecode(activeEv.startTime)} - {formatTimecode(activeEv.endTime)})
+                    </span>
 
-                  {/* Selector rápido de Equipo */}
-                  <select
-                    value={selectedEvent.team}
-                    onChange={(e) =>
-                      updateExistingClip(selectedEvent.id, {
-                        team: e.target.value as 'Séneca CF' | 'Rival',
-                      })
-                    }
-                    className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-gray-50"
-                    title="Cambiar equipo que realiza la acción"
-                  >
-                    <option value="Séneca CF">Séneca CF</option>
-                    <option value="Rival">Rival ({rivalName})</option>
-                  </select>
+                    {/* Selector rápido de Equipo */}
+                    <select
+                      value={activeEv.team}
+                      onChange={(e) =>
+                        updateExistingClip(activeEv.id, {
+                          team: e.target.value as 'Séneca CF' | 'Rival',
+                        })
+                      }
+                      className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-gray-50"
+                      title="Cambiar equipo que realiza la acción"
+                    >
+                      <option value="Séneca CF">Séneca CF</option>
+                      <option value="Rival">Rival ({rivalName})</option>
+                    </select>
 
-                  {/* Selector rápido de Quién lo ha hecho (Jugador) */}
-                  <select
-                    value={selectedEvent.player || ''}
-                    onChange={(e) =>
-                      updateExistingClip(selectedEvent.id, {
-                        player: e.target.value || undefined,
-                      })
-                    }
-                    className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] bg-gray-50 text-gray-800"
-                    title="Marcar quién ha hecho esta acción"
-                  >
-                    <option value="">-- Quién lo ha hecho (Colectivo) --</option>
-                    {selectedEvent.player &&
-                      !allAvailablePlayers.includes(selectedEvent.player) && (
-                        <option value={selectedEvent.player}>{selectedEvent.player}</option>
-                      )}
-                    {allAvailablePlayers.map((p) => (
-                      <option key={p} value={p}>
-                        {p}
-                      </option>
-                    ))}
-                  </select>
+                    {/* Selector rápido de Posición */}
+                    <select
+                      value={activeEv.player || ''}
+                      onChange={(e) =>
+                        updateExistingClip(activeEv.id, {
+                          player: e.target.value || undefined,
+                        })
+                      }
+                      className="border border-gray-300 rounded px-1.5 py-0.5 text-[11px] bg-gray-50 text-gray-800 font-medium"
+                      title="Marcar posición en esta acción"
+                    >
+                      <option value="">-- Sin posición marcada --</option>
+                      {activeEv.player &&
+                        !allAvailablePlayers.includes(activeEv.player) && (
+                          <option value={activeEv.player}>{activeEv.player}</option>
+                        )}
+                      {allAvailablePlayers.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
 
-                  {/* Botones rápidos Positivo / Negativo */}
-                  <button
-                    onClick={() =>
-                      updateExistingClip(selectedEvent.id, {
-                        descriptors: applyOutcomeToDescriptors(selectedEvent.descriptors, 'positivo'),
-                      })
-                    }
-                    className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
-                      getClipOutcome(selectedEvent.descriptors) === 'positivo'
-                        ? 'bg-emerald-600 text-white border-emerald-700'
-                        : 'bg-gray-50 text-emerald-700 border-gray-300 hover:bg-emerald-50'
-                    }`}
-                    title="Marcar acción como Positiva / Éxito"
-                  >
-                    ✓ Positivo
-                  </button>
-                  <button
-                    onClick={() =>
-                      updateExistingClip(selectedEvent.id, {
-                        descriptors: applyOutcomeToDescriptors(selectedEvent.descriptors, 'negativo'),
-                      })
-                    }
-                    className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
-                      getClipOutcome(selectedEvent.descriptors) === 'negativo'
-                        ? 'bg-[#cc2016] text-white border-red-800'
-                        : 'bg-gray-50 text-red-700 border-gray-300 hover:bg-red-50'
-                    }`}
-                    title="Marcar acción como Negativa / Fallo"
-                  >
-                    ✕ Negativo
-                  </button>
+                    {/* Botones rápidos Éxito (Acierto) / Negativo (No acertada) */}
+                    <button
+                      onClick={() =>
+                        updateExistingClip(activeEv.id, {
+                          descriptors: applyOutcomeToDescriptors(
+                            activeEv.descriptors,
+                            activeOutcome === 'positivo' ? 'neutro' : 'positivo'
+                          ),
+                        })
+                      }
+                      className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
+                        activeOutcome === 'positivo'
+                          ? 'bg-emerald-600 text-white border-emerald-700'
+                          : 'bg-gray-50 text-emerald-700 border-gray-300 hover:bg-emerald-50'
+                      }`}
+                      title="Marcar o desmarcar Con Éxito / Acierto"
+                    >
+                      ✓ Con Éxito / Acierto
+                    </button>
+                    <button
+                      onClick={() =>
+                        updateExistingClip(activeEv.id, {
+                          descriptors: applyOutcomeToDescriptors(
+                            activeEv.descriptors,
+                            activeOutcome === 'negativo' ? 'neutro' : 'negativo'
+                          ),
+                        })
+                      }
+                      className={`px-2 py-0.5 rounded font-condensed font-bold text-[11px] uppercase border transition ${
+                        activeOutcome === 'negativo'
+                          ? 'bg-[#cc2016] text-white border-red-800'
+                          : 'bg-gray-50 text-red-700 border-gray-300 hover:bg-red-50'
+                      }`}
+                      title="Marcar o desmarcar Negativo / No Acertada"
+                    >
+                      ✕ Negativo / No Acertada
+                    </button>
 
-                  <button
-                    onClick={() => openEditClipModal(selectedEvent)}
-                    className="px-2 py-0.5 bg-[#15181d] hover:bg-[#cc2016] text-[#f5b800] hover:text-white rounded font-condensed font-bold text-[11px] uppercase flex items-center gap-1 transition"
-                    title="Abrir ventana para editar jugador, nombre y resultado"
-                  >
-                    <Pencil className="w-3 h-3" />
-                    <span>Editar</span>
-                  </button>
-                </div>
-              ) : (
+                    <button
+                      onClick={() => openEditClipModal(activeEv)}
+                      className="px-2 py-0.5 bg-[#15181d] hover:bg-[#cc2016] text-[#f5b800] hover:text-white rounded font-condensed font-bold text-[11px] uppercase flex items-center gap-1 transition"
+                      title="Abrir ventana para editar posición, nombre y resultado"
+                    >
+                      <Pencil className="w-3 h-3" />
+                      <span>Editar</span>
+                    </button>
+                  </div>
+                );
+              })() : (
                 <span className="text-xs text-gray-400">
-                  Selecciona cualquier corte o grupo para reproducir o editar quién lo ha hecho y si es positivo/negativo
+                  Selecciona o reproduce cualquier corte para marcar su Posición y si ha sido Con Éxito (Acierto) o Negativo (No Acertada)
                 </span>
               )}
             </div>
@@ -4818,30 +5067,45 @@ ${xmlInstances}
                                           </div>
                                         </div>
 
-                                        {/* Barra rápida en cada corte para cambiar QUIÉN LO HA HECHO y POSITIVO / NEGATIVO */}
-                                        <div className="flex flex-wrap items-center justify-between gap-1 pl-5 pt-0.5 border-t border-gray-100">
-                                          <button
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              openEditClipModal(ev);
-                                            }}
-                                            className={`px-2 py-0.5 rounded text-[10.5px] border flex items-center gap-1 transition ${
+                                        {/* Barra rápida en cada corte para marcar POSICIÓN y CON ACIERTO / NO ACERTADA */}
+                                        <div
+                                          className="flex flex-wrap items-center justify-between gap-1 pl-5 pt-0.5 border-t border-gray-100"
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          <select
+                                            value={ev.player || ''}
+                                            onChange={(e) =>
+                                              updateExistingClip(ev.id, {
+                                                player: e.target.value || undefined,
+                                              })
+                                            }
+                                            className={`px-1.5 py-0.5 rounded text-[10.5px] border transition max-w-[165px] focus:outline-none ${
                                               ev.player
-                                                ? 'bg-gray-100 text-gray-800 border-gray-300 font-semibold hover:bg-gray-200'
-                                                : 'bg-amber-50 text-amber-900 border-amber-300 font-semibold hover:bg-amber-100'
+                                                ? 'bg-gray-100 text-gray-900 border-gray-300 font-semibold'
+                                                : 'bg-amber-50 text-amber-900 border-amber-300 font-medium'
                                             }`}
-                                            title="Haz clic para elegir o cambiar quién ha hecho esta acción"
+                                            title="Elegir o cambiar la posición en este corte"
                                           >
-                                            <Users className="w-2.5 h-2.5 text-[#cc2016]" />
-                                            <span>{ev.player ? ev.player : '+ Poner quién lo ha hecho'}</span>
-                                          </button>
+                                            <option value="">-- Marcar posición --</option>
+                                            {ev.player && !allAvailablePlayers.includes(ev.player) && (
+                                              <option value={ev.player}>{ev.player}</option>
+                                            )}
+                                            {allAvailablePlayers.map((p) => (
+                                              <option key={p} value={p}>
+                                                {p}
+                                              </option>
+                                            ))}
+                                          </select>
 
                                           <div className="flex items-center gap-1">
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 updateExistingClip(ev.id, {
-                                                  descriptors: applyOutcomeToDescriptors(ev.descriptors, 'positivo'),
+                                                  descriptors: applyOutcomeToDescriptors(
+                                                    ev.descriptors,
+                                                    evOutcome === 'positivo' ? 'neutro' : 'positivo'
+                                                  ),
                                                 });
                                               }}
                                               className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
@@ -4849,15 +5113,18 @@ ${xmlInstances}
                                                   ? 'bg-emerald-600 text-white border-emerald-700'
                                                   : 'bg-white text-emerald-700 border-gray-300 hover:bg-emerald-50'
                                               }`}
-                                              title="Marcar como Positivo / Éxito"
+                                              title="Marcar o desmarcar como Con Éxito / Acierto"
                                             >
-                                              ✓ Positivo
+                                              ✓ Acierto
                                             </button>
                                             <button
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 updateExistingClip(ev.id, {
-                                                  descriptors: applyOutcomeToDescriptors(ev.descriptors, 'negativo'),
+                                                  descriptors: applyOutcomeToDescriptors(
+                                                    ev.descriptors,
+                                                    evOutcome === 'negativo' ? 'neutro' : 'negativo'
+                                                  ),
                                                 });
                                               }}
                                               className={`px-1.5 py-0.5 rounded text-[10px] font-condensed font-bold uppercase border transition ${
@@ -4865,9 +5132,9 @@ ${xmlInstances}
                                                   ? 'bg-[#cc2016] text-white border-red-800'
                                                   : 'bg-white text-red-700 border-gray-300 hover:bg-red-50'
                                               }`}
-                                              title="Marcar como Negativo / Fallo"
+                                              title="Marcar o desmarcar como Negativo / No Acertada"
                                             >
-                                              ✕ Negativo
+                                              ✕ No Acertada
                                             </button>
                                           </div>
                                         </div>
@@ -5912,20 +6179,20 @@ ${xmlInstances}
       </div>
 
       {/* =====================================================================
-          MODAL: MATRIZ DE DATOS NACSPORT (CRUCE DE CATEGORÍAS Y EQUIPOS / PARTES)
+          MODAL: MATRIZ DE DATOS NACSPORT (POSICIONES, ACIERTO / NO ACERTADAS Y CATEGORÍAS)
          ===================================================================== */}
       {showMatrixModal && (
         <div className="fixed inset-0 bg-black/65 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-4xl w-full p-5 shadow-2xl border-t-4 border-[#cc2016] max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between pb-3 border-b border-gray-200 mb-3 shrink-0">
+          <div className="bg-white rounded-lg max-w-6xl w-full p-5 shadow-2xl border-t-4 border-[#cc2016] max-h-[92vh] flex flex-col">
+            <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-gray-200 mb-3 shrink-0">
               <div className="flex items-center gap-2.5">
                 <img src="/seneca-shield.jpg" alt="Séneca CF" className="w-8 h-8 object-contain" />
                 <div>
                   <h3 className="font-condensed font-bold text-lg uppercase text-gray-900">
-                    MATRIZ DE DATOS NACSPORT - AGRUPACIÓN INTERACTIVA DE CORTES (SÉNECA CF)
+                    MATRIZ DE DATOS NACSPORT - POSICIONES (CON ACIERTO / NO ACERTADAS) Y CATEGORÍAS
                   </h3>
                   <p className="text-xs text-gray-500">
-                    Haz clic en cualquier celda de la matriz para reproducir al instante todos los cortes de esa combinación
+                    Haz clic en cualquier número o posición para reproducir al instante los cortes con acierto, no acertados o por demarcación
                   </p>
                 </div>
               </div>
@@ -5934,103 +6201,591 @@ ${xmlInstances}
               </button>
             </div>
 
-            <div className="overflow-auto flex-1">
-              <table className="w-full border-collapse text-xs">
-                <thead>
-                  <tr className="bg-[#15181d] text-white font-condensed uppercase text-sm tracking-wider">
-                    <th className="p-2.5 text-left border border-gray-700">Categoría / Acción</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-[#cc2016]">Séneca CF (1ª P)</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-[#a81810]">Séneca CF (2ª P)</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-[#1666c0]">Rival (1ª P)</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-[#114f96]">Rival (2ª P)</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-emerald-800">✓ Positivo</th>
-                    <th className="p-2.5 text-center border border-gray-700 bg-red-800">✕ Negativo</th>
-                    <th className="p-2.5 text-center border border-gray-700">TOTAL GRUPO</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {tagCategories.map((cat) => {
-                    const allCat = events.filter((e) => e.category === cat.name);
-                    const sen1 = allCat.filter((e) => e.team === 'Séneca CF' && (e.half || '1ª Parte') === '1ª Parte');
-                    const sen2 = allCat.filter((e) => e.team === 'Séneca CF' && e.half === '2ª Parte');
-                    const riv1 = allCat.filter((e) => e.team === 'Rival' && (e.half || '1ª Parte') === '1ª Parte');
-                    const riv2 = allCat.filter((e) => e.team === 'Rival' && e.half === '2ª Parte');
-                    const exito = allCat.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
-                    const fallo = allCat.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
+            {/* Pestañas de vista de la Matriz */}
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  onClick={() => setMatrixViewMode('completa')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition ${
+                    matrixViewMode === 'completa'
+                      ? 'bg-[#cc2016] text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Vista Completa (Posiciones + Categorías)
+                </button>
+                <button
+                  onClick={() => setMatrixViewMode('posiciones')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition ${
+                    matrixViewMode === 'posiciones'
+                      ? 'bg-[#cc2016] text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Matriz por Posiciones (✓ Acierto / ✕ No Acertadas)
+                </button>
+                <button
+                  onClick={() => setMatrixViewMode('categorias')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition ${
+                    matrixViewMode === 'categorias'
+                      ? 'bg-[#cc2016] text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Matriz por Categorías
+                </button>
+                <button
+                  onClick={() => setMatrixViewMode('cruce')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition ${
+                    matrixViewMode === 'cruce'
+                      ? 'bg-[#cc2016] text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                  }`}
+                >
+                  Cruce Categoría × Posición
+                </button>
+              </div>
 
-                    const renderCell = (clips: ClipEvent[], badgeColor: string) => (
-                      <td className="p-2 border border-gray-200 text-center">
-                        {clips.length > 0 ? (
-                          <button
-                            onClick={() => {
-                              setShowMatrixModal(false);
-                              startPlayingClipQueue(clips);
-                            }}
-                            style={{ backgroundColor: badgeColor }}
-                            className="px-3 py-1 rounded text-white font-bold hover:opacity-90 transition inline-flex items-center gap-1 shadow-sm"
-                            title="Haz clic para reproducir este grupo de cortes"
-                          >
-                            <Play className="w-3 h-3 fill-current" />
-                            <span>{clips.length}</span>
-                          </button>
-                        ) : (
-                          <span className="text-gray-300">0</span>
-                        )}
-                      </td>
-                    );
+              {/* Resumen global rápido */}
+              <div className="flex items-center gap-2 text-xs">
+                <span className="px-2.5 py-1 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold">
+                  ✓ Con Acierto: {events.filter((e) => getClipOutcome(e.descriptors) === 'positivo').length}
+                </span>
+                <span className="px-2.5 py-1 rounded bg-red-50 border border-red-200 text-red-800 font-bold">
+                  ✕ No Acertadas: {events.filter((e) => getClipOutcome(e.descriptors) === 'negativo').length}
+                </span>
+                <span className="px-2.5 py-1 rounded bg-gray-100 border border-gray-300 text-gray-700 font-bold">
+                  Total Cortes: {events.length}
+                </span>
+              </div>
+            </div>
 
-                    return (
-                      <tr key={cat.id} className="hover:bg-gray-50">
-                        <td className="p-2 border border-gray-200 font-semibold flex items-center gap-2">
-                          <span className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: cat.color }} />
-                          <span>{cat.name}</span>
-                        </td>
-                        {renderCell(sen1, '#cc2016')}
-                        {renderCell(sen2, '#a81810')}
-                        {renderCell(riv1, '#1666c0')}
-                        {renderCell(riv2, '#114f96')}
-                        {renderCell(exito, '#2e7d32')}
-                        {renderCell(fallo, '#b91c1c')}
-                        <td className="p-2 border border-gray-200 text-center bg-gray-50">
-                          {allCat.length > 0 ? (
-                            <div className="flex items-center justify-center gap-1">
+            <div className="overflow-auto flex-1 space-y-5 pr-1">
+              {/* =================================================================
+                  BLOQUE 1: MATRIZ POR POSICIONES (CON ACIERTO vs NO ACERTADAS)
+                 ================================================================= */}
+              {(matrixViewMode === 'completa' || matrixViewMode === 'posiciones') && (() => {
+                const extraPositionsInEvents = Array.from(
+                  new Set(
+                    events
+                      .map((e) => (e.player || '').trim())
+                      .filter((p) => p !== '' && !allAvailablePlayers.includes(p))
+                  )
+                );
+                const positionRows = [...allAvailablePlayers, ...extraPositionsInEvents];
+                const unassignedClips = events.filter((e) => !e.player || !e.player.trim());
+
+                const renderOutcomePlayCell = (clips: ClipEvent[], badgeColor: string, labelPrefix?: string) => (
+                  <td className="p-2 border border-gray-200 text-center">
+                    {clips.length > 0 ? (
+                      <button
+                        onClick={() => {
+                          setShowMatrixModal(false);
+                          startPlayingClipQueue(clips);
+                        }}
+                        style={{ backgroundColor: badgeColor }}
+                        className="px-3 py-1 rounded text-white font-bold hover:opacity-90 transition inline-flex items-center gap-1 shadow-sm"
+                        title="Haz clic para reproducir estos cortes en vídeo"
+                      >
+                        <Play className="w-3 h-3 fill-current" />
+                        <span>
+                          {labelPrefix ? `${labelPrefix} ` : ''}
+                          {clips.length}
+                        </span>
+                      </button>
+                    ) : (
+                      <span className="text-gray-300">0</span>
+                    )}
+                  </td>
+                );
+
+                return (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="font-condensed font-bold text-sm uppercase tracking-wider text-gray-900 flex items-center gap-2">
+                        <span className="w-2.5 h-2.5 rounded-sm bg-[#cc2016]" />
+                        <span>MATRIZ POR POSICIONES — ACCIONES CON ACIERTO (ÉXITO) Y NO ACERTADAS (NEGATIVO)</span>
+                      </h4>
+                      <span className="text-[11px] text-gray-500">
+                        Pulsa en ✓ Con Acierto o ✕ No Acertadas de cualquier posición para ver sus cortes
+                      </span>
+                    </div>
+
+                    <table className="w-full border-collapse text-xs">
+                      <thead>
+                        <tr className="bg-[#15181d] text-white font-condensed uppercase text-sm tracking-wider">
+                          <th className="p-2.5 text-left border border-gray-700">Posición / Demarcación</th>
+                          <th className="p-2.5 text-center border border-gray-700 bg-emerald-700">
+                            ✓ Con Acierto (Éxito)
+                          </th>
+                          <th className="p-2.5 text-center border border-gray-700 bg-[#cc2016]">
+                            ✕ No Acertadas (Negativo)
+                          </th>
+                          <th className="p-2.5 text-center border border-gray-700 bg-gray-700">
+                            ➖ Sin marcar
+                          </th>
+                          <th className="p-2.5 text-center border border-gray-700 bg-[#1f2937]">
+                            % Acierto
+                          </th>
+                          <th className="p-2.5 text-left border border-gray-700">
+                            Desglose por Acción / Categoría (✓ Acierto / ✕ No Acertada)
+                          </th>
+                          <th className="p-2.5 text-center border border-gray-700">TOTAL POSICIÓN</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {positionRows.map((pos) => {
+                          const allPos = events.filter((e) => (e.player || '').trim() === pos);
+                          const aciertos = allPos.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
+                          const noAcertadas = allPos.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
+                          const sinMarcar = allPos.filter((e) => getClipOutcome(e.descriptors) === 'neutro');
+                          const evaluatedTotal = aciertos.length + noAcertadas.length;
+                          const pctAcierto =
+                            evaluatedTotal > 0 ? Math.round((aciertos.length / evaluatedTotal) * 100) : null;
+
+                          // Agrupar por categoría dentro de esta posición
+                          const catsWithClips = tagCategories
+                            .map((cat) => {
+                              const catClips = allPos.filter((e) => e.category === cat.name);
+                              const catOk = catClips.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
+                              const catFail = catClips.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
+                              return { cat, catClips, catOk, catFail };
+                            })
+                            .filter((item) => item.catClips.length > 0);
+
+                          return (
+                            <tr
+                              key={pos}
+                              className={`hover:bg-gray-50 ${allPos.length > 0 ? 'bg-white' : 'bg-gray-50/40'}`}
+                            >
+                              <td className="p-2 border border-gray-200 font-bold text-gray-900 whitespace-nowrap">
+                                <div className="flex items-center gap-1.5">
+                                  <Users className="w-3.5 h-3.5 text-[#cc2016] shrink-0" />
+                                  <span>{pos}</span>
+                                </div>
+                              </td>
+                              {renderOutcomePlayCell(aciertos, '#15803d', '✓')}
+                              {renderOutcomePlayCell(noAcertadas, '#cc2016', '✕')}
+                              {renderOutcomePlayCell(sinMarcar, '#4b5563')}
+                              <td className="p-2 border border-gray-200 text-center font-bold">
+                                {pctAcierto !== null ? (
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[11px] inline-block ${
+                                      pctAcierto >= 60
+                                        ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                        : pctAcierto >= 40
+                                        ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                        : 'bg-red-100 text-red-900 border border-red-300'
+                                    }`}
+                                  >
+                                    {pctAcierto}% ({aciertos.length}/{evaluatedTotal})
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-300">—</span>
+                                )}
+                              </td>
+                              <td className="p-2 border border-gray-200">
+                                {catsWithClips.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {catsWithClips.map(({ cat, catClips, catOk, catFail }) => (
+                                      <button
+                                        key={cat.id}
+                                        onClick={() => {
+                                          setShowMatrixModal(false);
+                                          startPlayingClipQueue(catClips);
+                                        }}
+                                        className="px-2 py-0.5 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px] flex items-center gap-1 transition"
+                                        title={`Reproducir ${cat.name} de ${pos}`}
+                                      >
+                                        <span
+                                          className="w-2 h-2 rounded-full shrink-0"
+                                          style={{ backgroundColor: cat.color }}
+                                        />
+                                        <span className="font-semibold text-gray-800">{cat.name}:</span>
+                                        {catOk.length > 0 && (
+                                          <span className="text-emerald-700 font-bold">✓{catOk.length}</span>
+                                        )}
+                                        {catFail.length > 0 && (
+                                          <span className="text-red-700 font-bold">✕{catFail.length}</span>
+                                        )}
+                                        {catOk.length === 0 && catFail.length === 0 && (
+                                          <span className="text-gray-600 font-bold">{catClips.length}</span>
+                                        )}
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-300 text-[11px]">Sin acciones registradas</span>
+                                )}
+                              </td>
+                              <td className="p-2 border border-gray-200 text-center bg-gray-50">
+                                {allPos.length > 0 ? (
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      onClick={() => {
+                                        setShowMatrixModal(false);
+                                        startPlayingClipQueue(allPos);
+                                      }}
+                                      className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded flex items-center gap-1"
+                                      title={`Reproducir todos los cortes de ${pos}`}
+                                    >
+                                      <Play className="w-3 h-3 fill-current" />
+                                      <span>{allPos.length}</span>
+                                    </button>
+                                    <button
+                                      onClick={() => addClipsToActivePlaylist(allPos)}
+                                      className="px-2 py-1 bg-white border border-gray-300 text-gray-700 rounded text-[10px] font-bold hover:bg-gray-100"
+                                      title="Enviar cortes de esta posición a Lista de Presentación"
+                                    >
+                                      + Lista
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-300">0</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+
+                        {/* Fila para cortes sin posición marcada (si existen) */}
+                        {unassignedClips.length > 0 && (() => {
+                          const aciertos = unassignedClips.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
+                          const noAcertadas = unassignedClips.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
+                          const sinMarcar = unassignedClips.filter((e) => getClipOutcome(e.descriptors) === 'neutro');
+                          const evaluatedTotal = aciertos.length + noAcertadas.length;
+                          const pctAcierto =
+                            evaluatedTotal > 0 ? Math.round((aciertos.length / evaluatedTotal) * 100) : null;
+
+                          return (
+                            <tr className="bg-amber-50/60 hover:bg-amber-50">
+                              <td className="p-2 border border-gray-200 font-bold text-amber-900">
+                                -- Sin posición marcada --
+                              </td>
+                              {renderOutcomePlayCell(aciertos, '#15803d', '✓')}
+                              {renderOutcomePlayCell(noAcertadas, '#cc2016', '✕')}
+                              {renderOutcomePlayCell(sinMarcar, '#4b5563')}
+                              <td className="p-2 border border-gray-200 text-center font-bold">
+                                {pctAcierto !== null ? `${pctAcierto}%` : '—'}
+                              </td>
+                              <td className="p-2 border border-gray-200">
+                                <div className="flex flex-wrap gap-1">
+                                  {unassignedClips.map((clip) => (
+                                    <button
+                                      key={clip.id}
+                                      onClick={() => {
+                                        setShowMatrixModal(false);
+                                        openEditClipModal(clip);
+                                      }}
+                                      className="px-2 py-0.5 bg-white border border-amber-300 rounded text-[10.5px] text-amber-900 hover:bg-amber-100 font-medium flex items-center gap-1"
+                                      title="Haz clic para marcar la posición y si fue con acierto o no acertada"
+                                    >
+                                      <Pencil className="w-2.5 h-2.5 text-[#cc2016]" />
+                                      <span>
+                                        {clip.name} ({formatTimecode(clip.startTime)}) · Marcar posición
+                                      </span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </td>
+                              <td className="p-2 border border-gray-200 text-center">
+                                <button
+                                  onClick={() => {
+                                    setShowMatrixModal(false);
+                                    startPlayingClipQueue(unassignedClips);
+                                  }}
+                                  className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded inline-flex items-center gap-1"
+                                >
+                                  <Play className="w-3 h-3 fill-current" />
+                                  <span>{unassignedClips.length}</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
+
+              {/* =================================================================
+                  BLOQUE 2: MATRIZ POR CATEGORÍAS (CON COLUMNA DE POSICIONES Y ACIERTO/FALLO)
+                 ================================================================= */}
+              {(matrixViewMode === 'completa' || matrixViewMode === 'categorias') && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-condensed font-bold text-sm uppercase tracking-wider text-gray-900 flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-[#1666c0]" />
+                      <span>MATRIZ POR CATEGORÍAS / ACCIONES Y POSICIONES INTERVINIENTES</span>
+                    </h4>
+                  </div>
+
+                  <table className="w-full border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-[#15181d] text-white font-condensed uppercase text-sm tracking-wider">
+                        <th className="p-2.5 text-left border border-gray-700">Categoría / Acción</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-[#cc2016]">Séneca CF (1ª P)</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-[#a81810]">Séneca CF (2ª P)</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-[#1666c0]">Rival (1ª P)</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-[#114f96]">Rival (2ª P)</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-emerald-800">✓ Con Acierto</th>
+                        <th className="p-2.5 text-center border border-gray-700 bg-red-800">✕ No Acertadas</th>
+                        <th className="p-2.5 text-left border border-gray-700">
+                          Posiciones en esta Acción (✓ Acierto / ✕ No Acertada)
+                        </th>
+                        <th className="p-2.5 text-center border border-gray-700">TOTAL GRUPO</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200">
+                      {tagCategories.map((cat) => {
+                        const allCat = events.filter((e) => e.category === cat.name);
+                        const sen1 = allCat.filter(
+                          (e) => e.team === 'Séneca CF' && (e.half || '1ª Parte') === '1ª Parte'
+                        );
+                        const sen2 = allCat.filter((e) => e.team === 'Séneca CF' && e.half === '2ª Parte');
+                        const riv1 = allCat.filter(
+                          (e) => e.team === 'Rival' && (e.half || '1ª Parte') === '1ª Parte'
+                        );
+                        const riv2 = allCat.filter((e) => e.team === 'Rival' && e.half === '2ª Parte');
+                        const exito = allCat.filter((e) => getClipOutcome(e.descriptors) === 'positivo');
+                        const fallo = allCat.filter((e) => getClipOutcome(e.descriptors) === 'negativo');
+
+                        // Resumen por posición dentro de esta categoría
+                        const posMap = new Map<
+                          string,
+                          { clips: ClipEvent[]; ok: number; fail: number; neutral: number }
+                        >();
+                        allCat.forEach((ev) => {
+                          const key = (ev.player || '').trim() || 'Sin posición';
+                          const current = posMap.get(key) || { clips: [], ok: 0, fail: 0, neutral: 0 };
+                          current.clips.push(ev);
+                          const out = getClipOutcome(ev.descriptors);
+                          if (out === 'positivo') current.ok += 1;
+                          else if (out === 'negativo') current.fail += 1;
+                          else current.neutral += 1;
+                          posMap.set(key, current);
+                        });
+
+                        const renderCell = (clips: ClipEvent[], badgeColor: string) => (
+                          <td className="p-2 border border-gray-200 text-center">
+                            {clips.length > 0 ? (
                               <button
                                 onClick={() => {
                                   setShowMatrixModal(false);
-                                  startPlayingClipQueue(allCat);
+                                  startPlayingClipQueue(clips);
                                 }}
-                                className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded flex items-center gap-1"
+                                style={{ backgroundColor: badgeColor }}
+                                className="px-3 py-1 rounded text-white font-bold hover:opacity-90 transition inline-flex items-center gap-1 shadow-sm"
+                                title="Haz clic para reproducir este grupo de cortes"
                               >
                                 <Play className="w-3 h-3 fill-current" />
-                                <span>{allCat.length}</span>
+                                <span>{clips.length}</span>
                               </button>
-                              <button
-                                onClick={() => addClipsToActivePlaylist(allCat)}
-                                className="px-2 py-1 bg-white border border-gray-300 text-gray-700 rounded text-[10px] font-bold hover:bg-gray-100"
-                                title="Enviar grupo a Lista de Presentación"
-                              >
-                                + Lista
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-gray-400">0</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+                            ) : (
+                              <span className="text-gray-300">0</span>
+                            )}
+                          </td>
+                        );
+
+                        return (
+                          <tr key={cat.id} className="hover:bg-gray-50">
+                            <td className="p-2 border border-gray-200 font-semibold flex items-center gap-2 whitespace-nowrap">
+                              <span
+                                className="w-3 h-3 rounded-sm shrink-0"
+                                style={{ backgroundColor: cat.color }}
+                              />
+                              <span>{cat.name}</span>
+                            </td>
+                            {renderCell(sen1, '#cc2016')}
+                            {renderCell(sen2, '#a81810')}
+                            {renderCell(riv1, '#1666c0')}
+                            {renderCell(riv2, '#114f96')}
+                            {renderCell(exito, '#15803d')}
+                            {renderCell(fallo, '#b91c1c')}
+                            <td className="p-2 border border-gray-200">
+                              {posMap.size > 0 ? (
+                                <div className="flex flex-wrap gap-1">
+                                  {Array.from(posMap.entries()).map(([posName, info]) => (
+                                    <button
+                                      key={posName}
+                                      onClick={() => {
+                                        setShowMatrixModal(false);
+                                        startPlayingClipQueue(info.clips);
+                                      }}
+                                      className={`px-2 py-0.5 rounded border text-[10.5px] flex items-center gap-1 transition ${
+                                        posName === 'Sin posición'
+                                          ? 'bg-amber-50 border-amber-300 text-amber-900 hover:bg-amber-100'
+                                          : 'bg-gray-50 border-gray-300 text-gray-800 hover:bg-gray-100'
+                                      }`}
+                                      title={`Reproducir cortes de ${posName} en ${cat.name}`}
+                                    >
+                                      <span className="font-semibold">{posName}:</span>
+                                      {info.ok > 0 && (
+                                        <span className="px-1 rounded bg-emerald-600 text-white font-bold text-[9.5px]">
+                                          ✓{info.ok}
+                                        </span>
+                                      )}
+                                      {info.fail > 0 && (
+                                        <span className="px-1 rounded bg-[#cc2016] text-white font-bold text-[9.5px]">
+                                          ✕{info.fail}
+                                        </span>
+                                      )}
+                                      {info.neutral > 0 && (
+                                        <span className="px-1 rounded bg-gray-400 text-white font-bold text-[9.5px]">
+                                          {info.neutral}
+                                        </span>
+                                      )}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : (
+                                <span className="text-gray-300">—</span>
+                              )}
+                            </td>
+                            <td className="p-2 border border-gray-200 text-center bg-gray-50">
+                              {allCat.length > 0 ? (
+                                <div className="flex items-center justify-center gap-1">
+                                  <button
+                                    onClick={() => {
+                                      setShowMatrixModal(false);
+                                      startPlayingClipQueue(allCat);
+                                    }}
+                                    className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded flex items-center gap-1"
+                                  >
+                                    <Play className="w-3 h-3 fill-current" />
+                                    <span>{allCat.length}</span>
+                                  </button>
+                                  <button
+                                    onClick={() => addClipsToActivePlaylist(allCat)}
+                                    className="px-2 py-1 bg-white border border-gray-300 text-gray-700 rounded text-[10px] font-bold hover:bg-gray-100"
+                                    title="Enviar grupo a Lista de Presentación"
+                                  >
+                                    + Lista
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-gray-400">0</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* =================================================================
+                  BLOQUE 3: CRUCE CATEGORÍA × POSICIÓN (ACIERTO / NO ACERTADAS EN CADA CELDA)
+                 ================================================================= */}
+              {matrixViewMode === 'cruce' && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h4 className="font-condensed font-bold text-sm uppercase tracking-wider text-gray-900 flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-sm bg-emerald-700" />
+                      <span>CRUCE CATEGORÍA × POSICIÓN (✓ CON ACIERTO / ✕ NO ACERTADAS)</span>
+                    </h4>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-[11px]">
+                      <thead>
+                        <tr className="bg-[#15181d] text-white font-condensed uppercase tracking-wider">
+                          <th className="p-2 text-left border border-gray-700 sticky left-0 bg-[#15181d] z-10">
+                            Categoría \ Posición
+                          </th>
+                          {allAvailablePlayers.map((pos) => (
+                            <th key={pos} className="p-1.5 text-center border border-gray-700 min-w-[82px]">
+                              {pos}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-200">
+                        {tagCategories.map((cat) => (
+                          <tr key={cat.id} className="hover:bg-gray-50">
+                            <td className="p-2 border border-gray-200 font-semibold whitespace-nowrap sticky left-0 bg-white z-10 flex items-center gap-1.5">
+                              <span
+                                className="w-2.5 h-2.5 rounded-sm shrink-0"
+                                style={{ backgroundColor: cat.color }}
+                              />
+                              <span>{cat.name}</span>
+                            </td>
+                            {allAvailablePlayers.map((pos) => {
+                              const cellClips = events.filter(
+                                (e) => e.category === cat.name && (e.player || '').trim() === pos
+                              );
+                              const okClips = cellClips.filter(
+                                (e) => getClipOutcome(e.descriptors) === 'positivo'
+                              );
+                              const failClips = cellClips.filter(
+                                (e) => getClipOutcome(e.descriptors) === 'negativo'
+                              );
+
+                              return (
+                                <td key={pos} className="p-1.5 border border-gray-200 text-center">
+                                  {cellClips.length > 0 ? (
+                                    <div className="flex items-center justify-center gap-1 flex-wrap">
+                                      {okClips.length > 0 && (
+                                        <button
+                                          onClick={() => {
+                                            setShowMatrixModal(false);
+                                            startPlayingClipQueue(okClips);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-bold text-[10px] hover:bg-emerald-700"
+                                          title={`Reproducir ${okClips.length} con acierto de ${pos} en ${cat.name}`}
+                                        >
+                                          ✓{okClips.length}
+                                        </button>
+                                      )}
+                                      {failClips.length > 0 && (
+                                        <button
+                                          onClick={() => {
+                                            setShowMatrixModal(false);
+                                            startPlayingClipQueue(failClips);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-[#cc2016] text-white font-bold text-[10px] hover:bg-red-800"
+                                          title={`Reproducir ${failClips.length} no acertadas de ${pos} en ${cat.name}`}
+                                        >
+                                          ✕{failClips.length}
+                                        </button>
+                                      )}
+                                      {okClips.length === 0 && failClips.length === 0 && (
+                                        <button
+                                          onClick={() => {
+                                            setShowMatrixModal(false);
+                                            startPlayingClipQueue(cellClips);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-gray-600 text-white font-bold text-[10px]"
+                                        >
+                                          {cellClips.length}
+                                        </button>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-gray-200">·</span>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
             </div>
 
-            <div className="pt-3 border-t border-gray-200 mt-3 flex items-center justify-between shrink-0">
+            <div className="pt-3 border-t border-gray-200 mt-3 flex flex-wrap items-center justify-between gap-2 shrink-0">
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => exportEventsToCSV(projectName)}
                   className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded flex items-center gap-1.5"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Descargar Matriz CSV (Excel)</span>
+                  <span>Descargar Matriz CSV (Excel con Posiciones y Acierto)</span>
                 </button>
                 <button
                   onClick={exportEventsToNacsportXML}

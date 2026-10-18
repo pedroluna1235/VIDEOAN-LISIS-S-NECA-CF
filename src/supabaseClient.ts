@@ -35,6 +35,7 @@ export interface ClipEvent {
   freezeTimestamp?: number;
   freezeDuration?: number;
   playlistIds?: string[]; // Listas de presentación a las que pertenece
+  userClassified?: boolean; // true cuando el usuario ha marcado manualmente posición o éxito/negativo
   createdAt: string;
 }
 
@@ -129,6 +130,20 @@ export interface TagCategory {
   preRoll: number;
   postRoll: number;
   type: 'Ataque' | 'Defensa' | 'Transición' | 'ABP' | 'Resultado';
+  mode?: 'auto' | 'manual'; // 'auto' = preRoll/postRoll automático, 'manual' = inicio/fin con clic estilo Nacsport
+}
+
+export interface BotoneraTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  categories: TagCategory[];
+  descriptors: string[];
+  columns: number;
+  buttonSize: 'sm' | 'md' | 'lg';
+  directOneClickMode: boolean; // Si true, registra al instante sin pausar (estilo Nacsport en vivo)
+  showPitchZones: boolean;
+  showPlayersGrid: boolean;
 }
 
 export interface SenecaProject {
@@ -148,16 +163,16 @@ export interface SenecaProject {
 }
 
 export const DEFAULT_TAG_CATEGORIES: TagCategory[] = [
-  { id: 'cat-1', name: 'Salida de Balón', color: '#cc2016', shortcut: '1', preRoll: 5, postRoll: 5, type: 'Ataque' },
-  { id: 'cat-2', name: 'Ataque Organizado', color: '#e65100', shortcut: '2', preRoll: 6, postRoll: 6, type: 'Ataque' },
-  { id: 'cat-3', name: 'Transición Ofensiva', color: '#f5b800', shortcut: '3', preRoll: 5, postRoll: 6, type: 'Transición' },
-  { id: 'cat-4', name: 'Ocasión / Tiro', color: '#2e7d32', shortcut: '4', preRoll: 6, postRoll: 4, type: 'Resultado' },
-  { id: 'cat-5', name: 'GOL SÉNECA CF', color: '#1565c0', shortcut: '5', preRoll: 8, postRoll: 6, type: 'Resultado' },
-  { id: 'cat-6', name: 'Presión Alta / Robo', color: '#00838f', shortcut: '6', preRoll: 5, postRoll: 5, type: 'Defensa' },
-  { id: 'cat-7', name: 'Repliegue / Bloque Bajo', color: '#4527a0', shortcut: '7', preRoll: 5, postRoll: 5, type: 'Defensa' },
-  { id: 'cat-8', name: 'Transición Defensiva', color: '#6a1b9a', shortcut: '8', preRoll: 5, postRoll: 6, type: 'Transición' },
-  { id: 'cat-9', name: 'ABP Ofensiva', color: '#00695c', shortcut: '9', preRoll: 5, postRoll: 5, type: 'ABP' },
-  { id: 'cat-10', name: 'ABP Defensiva', color: '#37474f', shortcut: '0', preRoll: 5, postRoll: 5, type: 'ABP' },
+  { id: 'cat-1', name: 'Salida de Balón', color: '#cc2016', shortcut: '1', preRoll: 5, postRoll: 5, type: 'Ataque', mode: 'auto' },
+  { id: 'cat-2', name: 'Ataque Organizado', color: '#e65100', shortcut: '2', preRoll: 6, postRoll: 6, type: 'Ataque', mode: 'auto' },
+  { id: 'cat-3', name: 'Transición Ofensiva', color: '#f5b800', shortcut: '3', preRoll: 5, postRoll: 6, type: 'Transición', mode: 'auto' },
+  { id: 'cat-4', name: 'Ocasión / Tiro', color: '#2e7d32', shortcut: '4', preRoll: 6, postRoll: 4, type: 'Resultado', mode: 'auto' },
+  { id: 'cat-5', name: 'GOL SÉNECA CF', color: '#1565c0', shortcut: '5', preRoll: 8, postRoll: 6, type: 'Resultado', mode: 'auto' },
+  { id: 'cat-6', name: 'Presión Alta / Robo', color: '#00838f', shortcut: '6', preRoll: 5, postRoll: 5, type: 'Defensa', mode: 'auto' },
+  { id: 'cat-7', name: 'Repliegue / Bloque Bajo', color: '#4527a0', shortcut: '7', preRoll: 5, postRoll: 5, type: 'Defensa', mode: 'auto' },
+  { id: 'cat-8', name: 'Transición Defensiva', color: '#6a1b9a', shortcut: '8', preRoll: 5, postRoll: 6, type: 'Transición', mode: 'auto' },
+  { id: 'cat-9', name: 'ABP Ofensiva', color: '#00695c', shortcut: '9', preRoll: 5, postRoll: 5, type: 'ABP', mode: 'auto' },
+  { id: 'cat-10', name: 'ABP Defensiva', color: '#37474f', shortcut: '0', preRoll: 5, postRoll: 5, type: 'ABP', mode: 'auto' },
 ];
 
 export const NACSPORT_DESCRIPTORS = [
@@ -171,6 +186,42 @@ export const NACSPORT_DESCRIPTORS = [
   'Segunda Jugada',
   'Córner',
   'Falta Lateral',
+];
+
+export const DEFAULT_BOTONERA_TEMPLATES: BotoneraTemplate[] = [
+  {
+    id: 'tpl-seneca-pro',
+    name: 'Botonera Nacsport Pro - Séneca CF (Completa)',
+    description: '10 categorías tácticas + Descriptores + Jugadores + Zonas del campo',
+    categories: DEFAULT_TAG_CATEGORIES,
+    descriptors: NACSPORT_DESCRIPTORS,
+    columns: 5,
+    buttonSize: 'md',
+    directOneClickMode: true,
+    showPitchZones: true,
+    showPlayersGrid: true,
+  },
+  {
+    id: 'tpl-directo-banquillo',
+    name: 'Botonera Directo Banquillo (Botones Grandes)',
+    description: 'Diseñada para pantalla completa en directo / tablet con botones grandes y modo manual/automático',
+    categories: [
+      { id: 'b-1', name: 'Inicio / Salida Balón', color: '#cc2016', shortcut: '1', preRoll: 5, postRoll: 5, type: 'Ataque', mode: 'auto' },
+      { id: 'b-2', name: 'Posesión en Campo Rival', color: '#e65100', shortcut: '2', preRoll: 5, postRoll: 6, type: 'Ataque', mode: 'manual' },
+      { id: 'b-3', name: 'Contraataque / Trans. Of.', color: '#f5b800', shortcut: '3', preRoll: 4, postRoll: 6, type: 'Transición', mode: 'auto' },
+      { id: 'b-4', name: 'Llegada a Área / Tiro', color: '#2e7d32', shortcut: '4', preRoll: 6, postRoll: 4, type: 'Resultado', mode: 'auto' },
+      { id: 'b-5', name: 'Presión Tras Pérdida', color: '#00838f', shortcut: '5', preRoll: 4, postRoll: 5, type: 'Defensa', mode: 'auto' },
+      { id: 'b-6', name: 'Defensa Bloque Medio/Bajo', color: '#4527a0', shortcut: '6', preRoll: 5, postRoll: 5, type: 'Defensa', mode: 'manual' },
+      { id: 'b-7', name: 'ABP A Favor', color: '#00695c', shortcut: '7', preRoll: 5, postRoll: 5, type: 'ABP', mode: 'auto' },
+      { id: 'b-8', name: 'ABP En Contra', color: '#37474f', shortcut: '8', preRoll: 5, postRoll: 5, type: 'ABP', mode: 'auto' },
+    ],
+    descriptors: NACSPORT_DESCRIPTORS,
+    columns: 4,
+    buttonSize: 'lg',
+    directOneClickMode: true,
+    showPitchZones: true,
+    showPlayersGrid: true,
+  },
 ];
 
 export const DEFAULT_PLAYLISTS: PresentationPlaylist[] = [
