@@ -155,8 +155,12 @@ export default function App() {
   const [showSqlModal, setShowSqlModal] = useState<boolean>(false);
   const [showTutorialModal, setShowTutorialModal] = useState<boolean>(false);
   const [showMatrixModal, setShowMatrixModal] = useState<boolean>(false);
-  const [matrixViewMode, setMatrixViewMode] = useState<'completa' | 'posiciones' | 'categorias' | 'cruce' | 'partidos'>('completa');
+  const [matrixViewMode, setMatrixViewMode] = useState<'completa' | 'posiciones' | 'categorias' | 'cruce' | 'partidos' | 'eliminar'>('completa');
   const [matrixSelectedProjectIds, setMatrixSelectedProjectIds] = useState<string[]>([]);
+  const [matrixCutFilterCategory, setMatrixCutFilterCategory] = useState<string>('ALL');
+  const [matrixCutFilterOutcome, setMatrixCutFilterOutcome] = useState<'ALL' | 'positivo' | 'negativo' | 'neutro'>('ALL');
+  const [matrixCutSearch, setMatrixCutSearch] = useState<string>('');
+  const [matrixSelectedCutIds, setMatrixSelectedCutIds] = useState<string[]>([]);
   const [supabaseStatus, setSupabaseStatus] = useState<'synced' | 'syncing' | 'local_only'>('syncing');
   const [statusMessage, setStatusMessage] = useState<string>('');
 
@@ -3510,6 +3514,152 @@ ${xmlInstances}
       .filter((e): e is ClipEvent => Boolean(e));
   }, [activePlaylist, events]);
 
+  // Eliminar el corte que se está reproduciendo actualmente (desde pantalla completa o cola de la matriz)
+  const deleteCurrentPlayingClip = useCallback(() => {
+    const cur = playingQueue
+      ? playingQueue[playingQueueIndex]
+      : events.find((e) => e.id === selectedEventId) || currentPlayingEvent;
+    if (!cur) return;
+
+    if (!window.confirm(`¿Seguro que deseas eliminar el corte "${cur.name}"?`)) {
+      return;
+    }
+
+    const clipId = cur.id;
+    const clipMatchId = (cur as any).matchId || projectId;
+
+    // 1. Eliminar del partido actual
+    if (clipMatchId === projectId || events.some((e) => e.id === clipId)) {
+      handleDeleteClip(clipId);
+    }
+
+    // 2. Eliminar de otros partidos en catálogo
+    if (clipMatchId !== projectId) {
+      try {
+        const raw = localStorage.getItem('seneca_projects_catalog');
+        let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(catalog)) {
+          let updated = false;
+          catalog = catalog.map((p) => {
+            if (p.id === clipMatchId && Array.isArray(p.events)) {
+              updated = true;
+              return { ...p, events: p.events.filter((e) => e.id !== clipId) };
+            }
+            return p;
+          });
+          if (updated) {
+            localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+            setSavedProjects(catalog);
+          }
+        }
+      } catch (err) {
+        console.warn('Error eliminando corte de catálogo:', err);
+      }
+    }
+
+    // 3. Manejar la cola si estamos en reproducción de cola de matriz
+    if (playingQueue && playingQueue.length > 0) {
+      const nextQueue = playingQueue.filter((_, idx) => idx !== playingQueueIndex);
+      if (nextQueue.length === 0) {
+        setPlayingQueue(null);
+        setIsVideoPlaybackFullscreen(false);
+        if (document.fullscreenElement) {
+          document.exitFullscreen().catch(() => {});
+        }
+      } else {
+        const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
+        setPlayingQueue(nextQueue);
+        setPlayingQueueIndex(nextIdx);
+        activateClipPlayback(nextQueue[nextIdx], { fromQueue: true });
+      }
+    } else {
+      setIsVideoPlaybackFullscreen(false);
+      if (document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    notify(`Corte "${cur.name}" eliminado correctamente`);
+  }, [
+    playingQueue,
+    playingQueueIndex,
+    events,
+    selectedEventId,
+    currentPlayingEvent,
+    projectId,
+    handleDeleteClip,
+    activateClipPlayback,
+    notify,
+  ]);
+
+  // Eliminar uno o varios cortes seleccionados desde la Matriz
+  const deleteClipsByIds = useCallback(
+    (clipIds: string[]) => {
+      if (clipIds.length === 0) return;
+      const count = clipIds.length;
+      if (
+        !window.confirm(
+          `¿Seguro que deseas eliminar ${count === 1 ? 'este corte' : `estos ${count} cortes`} de la matriz?`
+        )
+      ) {
+        return;
+      }
+      const idsSet = new Set(clipIds);
+
+      // 1. Eliminar de events (partido actual)
+      setEvents((prev) => {
+        const next = prev.filter((e) => !idsSet.has(e.id));
+        pushHistory({ events: next });
+        return next;
+      });
+      if (selectedEventId && idsSet.has(selectedEventId)) {
+        setSelectedEventId(null);
+      }
+
+      // 2. Eliminar de catálogo (otros partidos si aplica)
+      try {
+        const raw = localStorage.getItem('seneca_projects_catalog');
+        let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(catalog)) {
+          let changed = false;
+          catalog = catalog.map((p) => {
+            if (Array.isArray(p.events)) {
+              const nextEvents = p.events.filter((e) => !idsSet.has(e.id));
+              if (nextEvents.length !== p.events.length) {
+                changed = true;
+                return { ...p, events: nextEvents };
+              }
+            }
+            return p;
+          });
+          if (changed) {
+            localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+            setSavedProjects(catalog);
+          }
+        }
+      } catch (err) {
+        console.warn('Error eliminando cortes de catálogo:', err);
+      }
+
+      // 3. Si alguno estaba en la cola de reproducción actual
+      if (playingQueue) {
+        const nextQueue = playingQueue.filter((c) => !idsSet.has(c.id));
+        if (nextQueue.length === 0) {
+          setPlayingQueue(null);
+          setIsVideoPlaybackFullscreen(false);
+        } else {
+          const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
+          setPlayingQueue(nextQueue);
+          setPlayingQueueIndex(nextIdx);
+        }
+      }
+
+      setMatrixSelectedCutIds((prev) => prev.filter((id) => !idsSet.has(id)));
+      notify(`${count === 1 ? 'Corte eliminado' : `${count} cortes eliminados`} con éxito`);
+    },
+    [selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify]
+  );
+
   const renderNacsportBotonera = (isFs: boolean) => {
     const colClass =
       botoneraColumns === 2
@@ -4427,6 +4577,15 @@ ${xmlInstances}
                         )}
 
                         <button
+                          onClick={deleteCurrentPlayingClip}
+                          className="px-2.5 py-1.5 bg-red-950/80 hover:bg-red-700 text-red-200 hover:text-white rounded text-xs font-condensed font-bold uppercase flex items-center gap-1 border border-red-700/60 transition ml-1"
+                          title="Eliminar este corte (de la matriz y del partido)"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                          <span className="hidden sm:inline">Eliminar corte</span>
+                        </button>
+
+                        <button
                           onClick={exitVideoPlaybackFullscreen}
                           className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase tracking-wider rounded shadow flex items-center gap-1.5 transition ml-1"
                           title="Salir de pantalla completa y volver a la botonera"
@@ -4714,6 +4873,17 @@ ${xmlInstances}
                       >
                         <Pencil className="w-3 h-3" />
                         <span>Editar</span>
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteCurrentPlayingClip();
+                        }}
+                        className="bg-[#15181d] hover:bg-red-700 text-red-400 hover:text-white px-2.5 flex items-center gap-1 font-condensed font-bold text-[11px] uppercase transition pointer-events-auto border-l border-white/15"
+                        title="Eliminar este corte del partido y de la matriz"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        <span>Eliminar</span>
                       </button>
                     </div>
                   )}
@@ -7776,6 +7946,18 @@ ${xmlInstances}
                   <Users className="w-3.5 h-3.5" />
                   <span>Comparativa por Partidos Señalados ({activeMatrixProjectIds.length})</span>
                 </button>
+                <button
+                  onClick={() => setMatrixViewMode('eliminar')}
+                  className={`px-3 py-1.5 rounded text-xs font-condensed font-bold uppercase transition flex items-center gap-1.5 ${
+                    matrixViewMode === 'eliminar'
+                      ? 'bg-red-700 text-white shadow-sm'
+                      : 'bg-red-50 text-red-700 hover:bg-red-100 border border-red-200'
+                  }`}
+                  title="Gestionar y eliminar cortes individuales o en lote de la matriz"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Eliminar Cortes ({matrixClips.length})</span>
+                </button>
               </div>
 
               {/* Resumen global rápido */}
@@ -8429,6 +8611,215 @@ ${xmlInstances}
                   </div>
                 </div>
               )}
+
+              {matrixViewMode === 'eliminar' && (() => {
+                const filtered = matrixClips.filter((c) => {
+                  if (matrixCutFilterCategory !== 'ALL' && c.category !== matrixCutFilterCategory) return false;
+                  const outcome = getClipOutcome(c.descriptors);
+                  if (matrixCutFilterOutcome !== 'ALL' && outcome !== matrixCutFilterOutcome) return false;
+                  if (matrixCutSearch.trim()) {
+                    const q = matrixCutSearch.toLowerCase();
+                    const matchText = `${c.name} ${c.player || ''} ${(c.descriptors || []).join(' ')} ${c.matchName || ''} ${c.notes || ''}`.toLowerCase();
+                    if (!matchText.includes(q)) return false;
+                  }
+                  return true;
+                });
+
+                const allFilteredSelected = filtered.length > 0 && filtered.every((c) => matrixSelectedCutIds.includes(c.id));
+
+                return (
+                  <div className="flex-1 flex flex-col min-h-0 bg-white">
+                    {/* Barra de herramientas y filtros */}
+                    <div className="bg-red-50/60 border border-red-200 rounded p-3 mb-3 shrink-0 flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-bold text-red-900 flex items-center gap-1">
+                          <Trash2 className="w-4 h-4 text-red-600" />
+                          Filtrar cortes a eliminar:
+                        </span>
+                        <select
+                          value={matrixCutFilterCategory}
+                          onChange={(e) => setMatrixCutFilterCategory(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 text-xs font-medium"
+                        >
+                          <option value="ALL">Todas las Categorías ({matrixClips.length})</option>
+                          {tagCategories.map((cat) => {
+                            const cnt = matrixClips.filter((c) => c.category === cat.name).length;
+                            return (
+                              <option key={cat.id} value={cat.name}>
+                                {cat.name} ({cnt})
+                              </option>
+                            );
+                          })}
+                        </select>
+
+                        <select
+                          value={matrixCutFilterOutcome}
+                          onChange={(e) => setMatrixCutFilterOutcome(e.target.value as any)}
+                          className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 text-xs font-medium"
+                        >
+                          <option value="ALL">Todos los Resultados</option>
+                          <option value="positivo">Solo ✓ Con Acierto / Éxito</option>
+                          <option value="negativo">Solo ✕ No Acertadas / Negativo</option>
+                          <option value="neutro">Sin clasificar (Neutro)</option>
+                        </select>
+
+                        <input
+                          type="text"
+                          placeholder="Buscar por jugador o nombre..."
+                          value={matrixCutSearch}
+                          onChange={(e) => setMatrixCutSearch(e.target.value)}
+                          className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 text-xs w-48"
+                        />
+                      </div>
+
+                      {/* Botones de acción masiva */}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (allFilteredSelected) {
+                              setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c.id === id)));
+                            } else {
+                              const next = new Set([...matrixSelectedCutIds, ...filtered.map((c) => c.id)]);
+                              setMatrixSelectedCutIds(Array.from(next));
+                            }
+                          }}
+                          className="px-2.5 py-1 bg-white border border-gray-300 hover:bg-gray-100 text-gray-800 rounded text-xs font-bold transition"
+                        >
+                          {allFilteredSelected ? 'Deseleccionar mostrados' : `Seleccionar todos (${filtered.length})`}
+                        </button>
+
+                        {matrixSelectedCutIds.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => deleteClipsByIds(matrixSelectedCutIds)}
+                            className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs font-bold flex items-center gap-1 shadow transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Eliminar {matrixSelectedCutIds.length} seleccionados</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Tabla de cortes */}
+                    <div className="flex-1 overflow-auto border border-gray-200 rounded">
+                      <table className="w-full text-xs text-left border-collapse">
+                        <thead className="bg-gray-100 text-gray-700 uppercase font-bold sticky top-0 border-b border-gray-200 z-10">
+                          <tr>
+                            <th className="p-2 w-10 text-center">
+                              <input
+                                type="checkbox"
+                                checked={allFilteredSelected}
+                                onChange={() => {
+                                  if (allFilteredSelected) {
+                                    setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c.id === id)));
+                                  } else {
+                                    const next = new Set([...matrixSelectedCutIds, ...filtered.map((c) => c.id)]);
+                                    setMatrixSelectedCutIds(Array.from(next));
+                                  }
+                                }}
+                              />
+                            </th>
+                            <th className="p-2">Categoría</th>
+                            <th className="p-2">Acción / Nombre</th>
+                            <th className="p-2">Posición / Jugador</th>
+                            <th className="p-2">Resultado</th>
+                            <th className="p-2">Tiempo</th>
+                            {activeMatrixProjectIds.length > 1 && <th className="p-2">Partido</th>}
+                            <th className="p-2 text-right">Acciones</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200">
+                          {filtered.length === 0 ? (
+                            <tr>
+                              <td colSpan={activeMatrixProjectIds.length > 1 ? 8 : 7} className="p-8 text-center text-gray-500 font-medium">
+                                No hay cortes que coincidan con los filtros seleccionados
+                              </td>
+                            </tr>
+                          ) : (
+                            filtered.map((clip) => {
+                              const isChecked = matrixSelectedCutIds.includes(clip.id);
+                              const outcome = getClipOutcome(clip.descriptors);
+                              return (
+                                <tr key={clip.id} className={`hover:bg-red-50/40 transition ${isChecked ? 'bg-red-50/70' : ''}`}>
+                                  <td className="p-2 text-center">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={() => {
+                                        setMatrixSelectedCutIds((prev) =>
+                                          prev.includes(clip.id) ? prev.filter((id) => id !== clip.id) : [...prev, clip.id]
+                                        );
+                                      }}
+                                    />
+                                  </td>
+                                  <td className="p-2">
+                                    <span
+                                      style={{ backgroundColor: clip.color || '#cc2016' }}
+                                      className="text-white font-condensed font-bold text-[10px] uppercase px-2 py-0.5 rounded shadow-sm inline-block"
+                                    >
+                                      {clip.category}
+                                    </span>
+                                  </td>
+                                  <td className="p-2 font-bold text-gray-900">{clip.name}</td>
+                                  <td className="p-2 text-gray-700">{clip.player || '—'}</td>
+                                  <td className="p-2">
+                                    {outcome === 'positivo' && (
+                                      <span className="px-1.5 py-0.5 bg-emerald-600 text-white text-[10px] font-condensed font-bold uppercase rounded">
+                                        ✓ Acierto
+                                      </span>
+                                    )}
+                                    {outcome === 'negativo' && (
+                                      <span className="px-1.5 py-0.5 bg-[#cc2016] text-white text-[10px] font-condensed font-bold uppercase rounded">
+                                        ✕ No Acertada
+                                      </span>
+                                    )}
+                                    {outcome === 'neutro' && <span className="text-gray-400 text-[11px]">—</span>}
+                                  </td>
+                                  <td className="p-2 text-gray-600 font-mono text-[11px]">
+                                    {formatTimecode(clip.startTime, false)} - {formatTimecode(clip.endTime, false)} ({Math.max(0, clip.endTime - clip.startTime).toFixed(1)}s)
+                                  </td>
+                                  {activeMatrixProjectIds.length > 1 && (
+                                    <td className="p-2 text-gray-600 truncate max-w-[140px]" title={clip.matchName}>
+                                      {clip.matchName || 'Partido'}
+                                    </td>
+                                  )}
+                                  <td className="p-2 text-right">
+                                    <div className="inline-flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setShowMatrixModal(false);
+                                          playClipInFullscreen(clip);
+                                        }}
+                                        className="px-2 py-1 bg-gray-900 hover:bg-gray-800 text-white rounded text-[11px] font-bold flex items-center gap-1 transition"
+                                        title="Ver corte a pantalla completa"
+                                      >
+                                        <Play className="w-3 h-3 fill-current" />
+                                        <span>Ver</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => deleteClipsByIds([clip.id])}
+                                        className="px-2 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-[11px] font-bold flex items-center gap-1 transition"
+                                        title="Eliminar este corte"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                        <span>Eliminar</span>
+                                      </button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="pt-3 border-t border-gray-200 mt-3 flex flex-wrap items-center justify-between gap-2 shrink-0">
@@ -8455,6 +8846,18 @@ ${xmlInstances}
                 >
                   <Code className="w-3.5 h-3.5" />
                   <span>Exportar XML Nacsport / Sportscode</span>
+                </button>
+                <button
+                  onClick={() => setMatrixViewMode(matrixViewMode === 'eliminar' ? 'completa' : 'eliminar')}
+                  className={`px-3 py-1.5 text-xs font-bold rounded flex items-center gap-1.5 transition ${
+                    matrixViewMode === 'eliminar'
+                      ? 'bg-gray-800 hover:bg-gray-700 text-white'
+                      : 'bg-red-700 hover:bg-red-800 text-white shadow-sm'
+                  }`}
+                  title="Gestionar y eliminar cortes de la matriz"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>{matrixViewMode === 'eliminar' ? 'Volver a la Matriz' : 'Eliminar Cortes de la Matriz'}</span>
                 </button>
               </div>
               <button
