@@ -4118,16 +4118,6 @@ ${xmlInstances}
                 >
                   REGISTRO SIN VÍDEO (CAMPO)
                 </button>
-                <button
-                  onClick={() => setActiveTab('editor')}
-                  className={`h-full px-4 font-condensed font-bold text-[14px] tracking-wider uppercase transition-all flex items-center border-b-[3px] ${
-                    activeTab === 'editor'
-                      ? 'bg-white text-[#141414] border-[#cc2016]'
-                      : 'bg-[#262626] text-gray-300 border-transparent hover:bg-[#303030] hover:text-white'
-                  }`}
-                >
-                  SOLO LÍNEA DE TIEMPO
-                </button>
               </nav>
             </div>
 
@@ -4279,9 +4269,7 @@ ${xmlInstances}
                     ? botoneraFullscreenLayout === 'board_only'
                       ? 'hidden'
                       : 'w-full lg:w-1/2 h-[340px] lg:h-full shrink-0 border-r border-gray-800'
-                    : activeTab === 'con_video'
-                    ? 'w-full h-[420px]'
-                    : 'w-full h-[490px]'
+                    : 'w-full h-[420px]'
                 } ${isDraggingOver ? 'ring-4 ring-[#cc2016]' : ''}`}
               >
                 <input
