@@ -175,67 +175,26 @@ export default function App() {
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [videoZoom, setVideoZoom] = useState<number>(100);
-  const [autoCropBlackBars, setAutoCropBlackBars] = useState<boolean>(true);
   const [videoCropBounds, setVideoCropBounds] = useState<VideoCropBounds>({
     left: 0,
     right: 1,
     top: 0,
     bottom: 1,
   });
-  const lastCropDetectTimeRef = useRef<number>(0);
 
   const refreshVideoCropBounds = useCallback(
-    (videoEl: HTMLVideoElement | null, force = false) => {
-      if (!autoCropBlackBars) {
-        const full = { left: 0, right: 1, top: 0, bottom: 1 };
-        setVideoCropBounds(full);
-        setActiveVideoCropBounds(full);
-        return;
-      }
-      if (!videoEl || videoEl.readyState < 2) return;
-      const now = performance.now();
-      if (!force && now - lastCropDetectTimeRef.current < 400) return;
-      lastCropDetectTimeRef.current = now;
-
-      const detected = detectVideoCropBounds(videoEl);
-      if (!detected) return;
-
-      setVideoCropBounds((prev) => {
-        const isDefault =
-          prev.left === 0 && prev.right === 1 && prev.top === 0 && prev.bottom === 1;
-        if (force || isDefault) {
-          setActiveVideoCropBounds(detected);
-          return detected;
-        }
-        // Estabilizar para evitar vibración durante reproducción salvo cambio claro de encuadre
-        const diff =
-          Math.abs(prev.left - detected.left) +
-          Math.abs(prev.right - detected.right) +
-          Math.abs(prev.top - detected.top) +
-          Math.abs(prev.bottom - detected.bottom);
-        if (diff > 0.04) {
-          setActiveVideoCropBounds(detected);
-          return detected;
-        }
-        return prev;
-      });
+    (_videoEl: HTMLVideoElement | null, _force = false) => {
+      const full = { left: 0, right: 1, top: 0, bottom: 1 };
+      setVideoCropBounds(full);
+      setActiveVideoCropBounds(full);
     },
-    [autoCropBlackBars]
+    []
   );
 
   useEffect(() => {
     const full = { left: 0, right: 1, top: 0, bottom: 1 };
     setVideoCropBounds(full);
     setActiveVideoCropBounds(full);
-    if (!activeVideoId) return;
-    const t1 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 80);
-    const t2 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 300);
-    const t3 = setTimeout(() => refreshVideoCropBounds(videoRef.current, true), 700);
-    return () => {
-      clearTimeout(t1);
-      clearTimeout(t2);
-      clearTimeout(t3);
-    };
   }, [activeVideoId, refreshVideoCropBounds]);
 
   const [timelineZoom, setTimelineZoom] = useState<number>(1);
@@ -4327,60 +4286,16 @@ ${xmlInstances}
                       <video
                         ref={videoRef}
                         src={activeVideo.url}
-                        className="object-fill block"
-                        style={{
-                          position: 'absolute',
-                          left: `${
-                            -(
-                              videoCropBounds.left /
-                              Math.max(0.2, videoCropBounds.right - videoCropBounds.left)
-                            ) * 100
-                          }%`,
-                          top: `${
-                            -(
-                              videoCropBounds.top /
-                              Math.max(0.2, videoCropBounds.bottom - videoCropBounds.top)
-                            ) * 100
-                          }%`,
-                          width: `${
-                            100 / Math.max(0.2, videoCropBounds.right - videoCropBounds.left)
-                          }%`,
-                          height: `${
-                            100 / Math.max(0.2, videoCropBounds.bottom - videoCropBounds.top)
-                          }%`,
-                          maxWidth: 'none',
-                          maxHeight: 'none',
-                          objectFit: 'fill',
-                          display: 'block',
-                        }}
+                        className="w-full h-full object-fill block"
                         onTimeUpdate={handleTimeUpdate}
                         onLoadedMetadata={() => {
                           if (videoRef.current) {
                             const dur = videoRef.current.duration;
                             setDuration(isFinite(dur) ? dur : activeVideo.duration || 60);
-                            refreshVideoCropBounds(videoRef.current, true);
-                          }
-                        }}
-                        onLoadedData={() => {
-                          if (videoRef.current) {
-                            refreshVideoCropBounds(videoRef.current, true);
-                          }
-                        }}
-                        onCanPlay={() => {
-                          if (videoRef.current) {
-                            refreshVideoCropBounds(videoRef.current, true);
-                          }
-                        }}
-                        onSeeked={() => {
-                          if (videoRef.current) {
-                            refreshVideoCropBounds(videoRef.current, true);
                           }
                         }}
                         onPlay={() => {
                           setIsPlaying(true);
-                          if (videoRef.current) {
-                            refreshVideoCropBounds(videoRef.current, true);
-                          }
                         }}
                         onPause={() => {
                           setIsPlaying(false);
@@ -4716,9 +4631,13 @@ ${xmlInstances}
                     >
                       -
                     </button>
-                    <span className="px-2.5 py-1 bg-[#e6e6e6] text-[#141414] font-medium text-xs">
+                    <button
+                      onClick={() => setVideoZoom(100)}
+                      className="px-2.5 py-1 bg-[#e6e6e6] hover:bg-white text-[#141414] font-medium text-xs cursor-pointer"
+                      title="Restablecer tamaño al 100%"
+                    >
                       {videoZoom}%
-                    </span>
+                    </button>
                     <button
                       onClick={() => setVideoZoom((z) => Math.min(250, z + 10))}
                       className="w-7 h-7 bg-[#e6e6e6] hover:bg-white text-[#141414] font-bold text-xs flex items-center justify-center"
