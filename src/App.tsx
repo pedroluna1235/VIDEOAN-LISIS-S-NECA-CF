@@ -58,6 +58,8 @@ import {
   Pencil,
   Check,
   X,
+  ChevronLeft,
+  RotateCcw,
   Film,
   FolderOpen,
   Save,
@@ -354,6 +356,7 @@ export default function App() {
     return NACSPORT_DESCRIPTORS;
   });
   const [isBotoneraFullscreen, setIsBotoneraFullscreen] = useState<boolean>(false);
+  const [isVideoPlaybackFullscreen, setIsVideoPlaybackFullscreen] = useState<boolean>(false);
   const [botoneraFullscreenLayout, setBotoneraFullscreenLayout] = useState<'split_video' | 'board_only'>('split_video');
   const [showBotoneraBuilderModal, setShowBotoneraBuilderModal] = useState<boolean>(false);
   const [builderTab, setBuilderTab] = useState<'categorias' | 'descriptores' | 'diseno' | 'plantillas'>('categorias');
@@ -906,6 +909,14 @@ export default function App() {
   const activateClipPlayback = useCallback(
     (clip: ClipEvent, options?: { fromQueue?: boolean; holdManual?: boolean }) => {
       setSelectedEventId(clip.id);
+
+      if (clip.videoId && clip.videoId !== activeVideoId) {
+        const found = videos.find((v) => v.id === clip.videoId);
+        if (found) {
+          setActiveVideoId(clip.videoId);
+        }
+      }
+
       const targetT = clip.freezeTimestamp ?? clip.startTime;
 
       if (activeTab === 'sin_video') {
@@ -943,7 +954,7 @@ export default function App() {
         setIsPlaying(true);
       }
     },
-    [activeTab, activeVideo]
+    [activeTab, activeVideo, activeVideoId, videos]
   );
 
   // Temporizador de pausa táctica cuando se reproduce o previsualiza un dibujo insertado en el vídeo
@@ -1067,17 +1078,64 @@ export default function App() {
     };
   }, [draggingHandle, maxTimelineDuration, activeVideo]);
 
-  // Reproducción continua de una cola de cortes agrupados o de una Lista de Presentación (estilo Nacsport)
+  // Reproducción de eventos y colas a pantalla completa (estilo Nacsport)
+  const exitVideoPlaybackFullscreen = useCallback(() => {
+    setIsVideoPlaybackFullscreen(false);
+    setPlayingQueue(null);
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }, []);
+
+  const playNextQueueClip = useCallback(() => {
+    if (!playingQueue || playingQueueIndex + 1 >= playingQueue.length) return;
+    const nextIdx = playingQueueIndex + 1;
+    setPlayingQueueIndex(nextIdx);
+    activateClipPlayback(playingQueue[nextIdx], { fromQueue: true });
+  }, [playingQueue, playingQueueIndex, activateClipPlayback]);
+
+  const playPrevQueueClip = useCallback(() => {
+    if (!playingQueue || playingQueueIndex <= 0) return;
+    const prevIdx = playingQueueIndex - 1;
+    setPlayingQueueIndex(prevIdx);
+    activateClipPlayback(playingQueue[prevIdx], { fromQueue: true });
+  }, [playingQueue, playingQueueIndex, activateClipPlayback]);
+
+  const replayCurrentClip = useCallback(() => {
+    const cur = playingQueue ? playingQueue[playingQueueIndex] : events.find((e) => e.id === selectedEventId);
+    if (cur) {
+      activateClipPlayback(cur, { fromQueue: Boolean(playingQueue) });
+    }
+  }, [playingQueue, playingQueueIndex, events, selectedEventId, activateClipPlayback]);
+
+  const playClipInFullscreen = useCallback(
+    (clip: ClipEvent) => {
+      setIsVideoPlaybackFullscreen(true);
+      setPlayingQueue([clip]);
+      setPlayingQueueIndex(0);
+      activateClipPlayback(clip, { fromQueue: true });
+      if (videoContainerRef.current && !document.fullscreenElement) {
+        videoContainerRef.current.requestFullscreen().catch(() => {});
+      }
+      notify(`Viendo evento "${clip.name}" a pantalla completa`);
+    },
+    [activateClipPlayback, notify]
+  );
+
   const startPlayingClipQueue = (clips: ClipEvent[]) => {
     if (clips.length === 0) {
       notify('No hay cortes en este grupo para reproducir');
       return;
     }
+    setIsVideoPlaybackFullscreen(true);
     setPlayingQueue(clips);
     setPlayingQueueIndex(0);
     const first = clips[0];
     activateClipPlayback(first, { fromQueue: true });
-    notify(`Reproduciendo grupo: ${clips.length} corte(s) seguidos`);
+    if (videoContainerRef.current && !document.fullscreenElement) {
+      videoContainerRef.current.requestFullscreen().catch(() => {});
+    }
+    notify(`Reproduciendo ${clips.length} evento(s) a pantalla completa de uno en uno`);
   };
 
   const handleTimeUpdate = () => {
@@ -1124,8 +1182,11 @@ export default function App() {
         } else {
           videoRef.current.pause();
           setIsPlaying(false);
-          setPlayingQueue(null);
-          notify('Reproducción del grupo finalizada');
+          notify(
+            playingQueue.length > 1
+              ? `Reproducción de los ${playingQueue.length} cortes finalizada`
+              : `Evento "${currentClip.name}" finalizado`
+          );
         }
         return;
       }
@@ -2560,9 +2621,33 @@ export default function App() {
         return;
       }
 
-      if (e.key === 'Escape' && isBotoneraFullscreen) {
-        exitBotoneraFullscreen();
-        return;
+      if (e.key === 'Escape') {
+        if (isVideoPlaybackFullscreen) {
+          exitVideoPlaybackFullscreen();
+          return;
+        }
+        if (isBotoneraFullscreen) {
+          exitBotoneraFullscreen();
+          return;
+        }
+      }
+
+      if (isVideoPlaybackFullscreen) {
+        if (e.key === 'ArrowRight' && playingQueue && playingQueueIndex + 1 < playingQueue.length) {
+          e.preventDefault();
+          playNextQueueClip();
+          return;
+        }
+        if (e.key === 'ArrowLeft' && playingQueue && playingQueueIndex > 0) {
+          e.preventDefault();
+          playPrevQueueClip();
+          return;
+        }
+        if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          replayCurrentClip();
+          return;
+        }
       }
 
       if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -2591,7 +2676,22 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [tagCategories, isBotoneraFullscreen, activeVideo, activeTab, handleQuickCategoryTag, enterBotoneraFullscreen, exitBotoneraFullscreen]);
+  }, [
+    tagCategories,
+    isBotoneraFullscreen,
+    isVideoPlaybackFullscreen,
+    playingQueue,
+    playingQueueIndex,
+    activeVideo,
+    activeTab,
+    handleQuickCategoryTag,
+    enterBotoneraFullscreen,
+    exitBotoneraFullscreen,
+    exitVideoPlaybackFullscreen,
+    playNextQueueClip,
+    playPrevQueueClip,
+    replayCurrentClip,
+  ]);
 
   // Manejo de Plantillas de Botonera
   const handleApplyTemplate = (tpl: BotoneraTemplate) => {
@@ -4224,7 +4324,9 @@ ${xmlInstances}
                   handleFilesSelected(e.dataTransfer.files);
                 }}
                 className={`relative bg-black flex flex-col justify-between overflow-hidden ${
-                  isBotoneraFullscreen
+                  isVideoPlaybackFullscreen
+                    ? 'fixed inset-0 z-50 w-screen h-screen'
+                    : isBotoneraFullscreen
                     ? botoneraFullscreenLayout === 'board_only'
                       ? 'hidden'
                       : 'w-full lg:w-1/2 h-[340px] lg:h-full shrink-0 border-r border-gray-800'
@@ -4241,6 +4343,101 @@ ${xmlInstances}
                 />
 
                 <div className="relative flex-1 min-h-0 w-full h-full overflow-hidden bg-black">
+                  {/* BARRA SUPERIOR FLOTANTE DE PANTALLA COMPLETA (Visor de eventos sin botonera) */}
+                  {isVideoPlaybackFullscreen && (
+                    <div className="absolute top-0 inset-x-0 z-40 bg-gradient-to-b from-black/95 via-black/80 to-transparent px-3 py-2.5 sm:px-5 flex items-center justify-between gap-3 pointer-events-auto border-b border-white/10 shadow-2xl">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-3 h-3 rounded-full bg-[#cc2016] animate-pulse shrink-0" />
+                        <div className="flex flex-col min-w-0 leading-tight">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[#f5b800] font-condensed font-black text-xs sm:text-sm tracking-wider uppercase">
+                              {playingQueue && playingQueue.length > 1
+                                ? `EVENTO (${playingQueueIndex + 1} DE ${playingQueue.length})`
+                                : 'EVENTO EN PANTALLA COMPLETA'}
+                            </span>
+                            {(playingQueue ? playingQueue[playingQueueIndex]?.category : currentPlayingEvent?.category) && (
+                              <span
+                                style={{
+                                  backgroundColor:
+                                    (playingQueue ? playingQueue[playingQueueIndex]?.color : currentPlayingEvent?.color) || '#cc2016',
+                                }}
+                                className="text-white font-condensed font-bold text-[11px] uppercase px-2 py-0.5 rounded tracking-wide shadow-sm"
+                              >
+                                {(playingQueue ? playingQueue[playingQueueIndex]?.category : currentPlayingEvent?.category)}
+                              </span>
+                            )}
+                            <span className="text-white font-condensed font-extrabold text-sm sm:text-base truncate max-w-[200px] sm:max-w-[360px]">
+                              {(playingQueue ? playingQueue[playingQueueIndex]?.name : currentPlayingEvent?.name) || 'Acción'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] text-gray-300 mt-0.5">
+                            <span>
+                              Corte: {formatTimecode((playingQueue ? playingQueue[playingQueueIndex]?.startTime : currentPlayingEvent?.startTime) || 0)} - {formatTimecode((playingQueue ? playingQueue[playingQueueIndex]?.endTime : currentPlayingEvent?.endTime) || 0)}
+                            </span>
+                            {(playingQueue && (playingQueue[playingQueueIndex] as any)?.matchName) && (
+                              <span className="bg-black/60 border border-white/20 px-1.5 py-0.2 rounded text-[10.5px] text-[#f5b800] font-medium">
+                                ⚽ {(playingQueue[playingQueueIndex] as any).matchName}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Botones de navegación y salida */}
+                      <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                        {playingQueue && playingQueue.length > 1 && (
+                          <>
+                            <button
+                              onClick={playPrevQueueClip}
+                              disabled={playingQueueIndex <= 0}
+                              className="px-2.5 py-1.5 bg-[#202020] hover:bg-[#303030] disabled:opacity-30 disabled:pointer-events-none text-white rounded text-xs font-condensed font-bold uppercase flex items-center gap-1 border border-white/10 transition"
+                              title="Evento anterior (Flecha Izquierda)"
+                            >
+                              <ChevronLeft className="w-4 h-4" />
+                              <span className="hidden md:inline">Anterior</span>
+                            </button>
+                            <button
+                              onClick={replayCurrentClip}
+                              className="px-2.5 py-1.5 bg-[#202020] hover:bg-[#303030] text-gray-200 rounded text-xs font-condensed font-bold uppercase flex items-center gap-1 border border-white/10 transition"
+                              title="Repetir este corte desde el inicio"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                              <span className="hidden md:inline">Repetir</span>
+                            </button>
+                            <button
+                              onClick={playNextQueueClip}
+                              disabled={playingQueueIndex + 1 >= playingQueue.length}
+                              className="px-2.5 py-1.5 bg-[#202020] hover:bg-[#303030] disabled:opacity-30 disabled:pointer-events-none text-white rounded text-xs font-condensed font-bold uppercase flex items-center gap-1 border border-white/10 transition"
+                              title="Siguiente evento (Flecha Derecha)"
+                            >
+                              <span className="hidden md:inline">Siguiente</span>
+                              <ChevronRight className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                        {(!playingQueue || playingQueue.length <= 1) && (
+                          <button
+                            onClick={replayCurrentClip}
+                            className="px-2.5 py-1.5 bg-[#202020] hover:bg-[#303030] text-gray-200 rounded text-xs font-condensed font-bold uppercase flex items-center gap-1 border border-white/10 transition"
+                            title="Repetir evento desde el inicio"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Repetir</span>
+                          </button>
+                        )}
+
+                        <button
+                          onClick={exitVideoPlaybackFullscreen}
+                          className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white font-condensed font-bold text-xs uppercase tracking-wider rounded shadow flex items-center gap-1.5 transition ml-1"
+                          title="Salir de pantalla completa y volver a la botonera"
+                        >
+                          <X className="w-4 h-4" />
+                          <span>Salir [ESC]</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   {!activeVideo && (
                     <div
                       className={`absolute inset-0 flex flex-col items-center justify-center text-center px-6 z-10 ${
@@ -4328,7 +4525,7 @@ ${xmlInstances}
 
                   {/* Indicador de Imagen Parada / Pausa Táctica Insertada en el Vídeo */}
                   {activeFreezeOverlay && (
-                    <div className="absolute top-3 left-3 z-30 flex items-center gap-2.5 bg-[#15181d]/95 border-l-4 border-[#cc2016] text-white px-3 py-1.5 shadow-lg">
+                    <div className={`absolute ${isVideoPlaybackFullscreen ? 'top-16 left-3' : 'top-3 left-3'} z-30 flex items-center gap-2.5 bg-[#15181d]/95 border-l-4 border-[#cc2016] text-white px-3 py-1.5 shadow-lg`}>
                       <span className="w-2.5 h-2.5 rounded-full bg-[#f5b800] animate-pulse" />
                       <div className="flex flex-col">
                         <span className="font-condensed font-bold text-xs uppercase tracking-wider text-[#f5b800]">
@@ -4405,7 +4602,7 @@ ${xmlInstances}
                   {currentPlayingEvent && (
                     <div
                       onClick={(e) => e.stopPropagation()}
-                      className="absolute top-3 right-3 z-30 flex items-stretch shadow-lg overflow-hidden border border-black/40 pointer-events-auto"
+                      className={`absolute ${isVideoPlaybackFullscreen ? 'top-16 right-3' : 'top-3 right-3'} z-30 flex items-stretch shadow-lg overflow-hidden border border-black/40 pointer-events-auto`}
                     >
                       <div className="bg-[#15181d] text-white font-condensed font-bold text-base px-3 py-1.5 flex items-center">
                         {activeMatchPeriodInfo
@@ -4522,7 +4719,7 @@ ${xmlInstances}
                   )}
 
                   {drawingMode && (
-                    <div className="absolute top-2.5 left-1/2 -translate-x-1/2 bg-[#15181d]/90 text-white px-3.5 py-1 rounded text-xs font-medium flex items-center gap-2 z-30 pointer-events-none border border-white/15">
+                    <div className={`absolute ${isVideoPlaybackFullscreen ? 'top-16 left-1/2' : 'top-2.5 left-1/2'} -translate-x-1/2 bg-[#15181d]/90 text-white px-3.5 py-1 rounded text-xs font-medium flex items-center gap-2 z-30 pointer-events-none border border-white/15`}>
                       <span className="w-2 h-2 rounded-full bg-[#cc2016]" />
                       {isMoveMode ? (
                         <span>Modo Mover: Haz clic y arrastra cualquier elemento pintado para recolocarlo</span>
@@ -4873,14 +5070,8 @@ ${xmlInstances}
                           setSelectedEventId(ev.id);
                           if (activeTab === 'sin_video') {
                             setLiveTimerSeconds(ev.startTime);
-                          } else if (ev.isFreezeInsert && ev.drawingDataUrl) {
-                            activateClipPlayback(ev, { holdManual: true });
                           } else {
-                            setActiveFreezeOverlay(null);
-                            setCurrentTime(ev.startTime);
-                            if (videoRef.current && activeVideo) {
-                              videoRef.current.currentTime = ev.startTime;
-                            }
+                            playClipInFullscreen(ev);
                           }
                         }}
                         style={{
@@ -5144,7 +5335,7 @@ ${xmlInstances}
                                   key={ev.id}
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    activateClipPlayback(ev, { holdManual: true });
+                                    playClipInFullscreen(ev);
                                   }}
                                   onDoubleClick={(e) => {
                                     e.stopPropagation();
@@ -6144,7 +6335,7 @@ ${xmlInstances}
                                       <div
                                         key={ev.id}
                                         onClick={() => {
-                                          activateClipPlayback(ev, { holdManual: true });
+                                          playClipInFullscreen(ev);
                                         }}
                                         className={`p-1.5 text-xs cursor-pointer transition flex flex-col gap-1 ${
                                           selectedEventId === ev.id ? 'bg-amber-50/80' : 'hover:bg-gray-50'
@@ -6406,7 +6597,7 @@ ${xmlInstances}
                               <div
                                 key={ev.id}
                                 onClick={() => {
-                                  activateClipPlayback(ev, { holdManual: true });
+                                  playClipInFullscreen(ev);
                                 }}
                                 className="bg-white border border-gray-200 p-1.5 rounded text-xs flex items-center justify-between cursor-pointer hover:bg-amber-50"
                               >
