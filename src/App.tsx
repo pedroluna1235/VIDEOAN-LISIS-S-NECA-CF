@@ -161,6 +161,9 @@ export default function App() {
   const [matrixCutFilterOutcome, setMatrixCutFilterOutcome] = useState<'ALL' | 'positivo' | 'negativo' | 'neutro'>('ALL');
   const [matrixCutSearch, setMatrixCutSearch] = useState<string>('');
   const [matrixSelectedCutIds, setMatrixSelectedCutIds] = useState<string[]>([]);
+  const [pendingDeleteClip, setPendingDeleteClip] = useState<ClipEvent | null>(null);
+  const [pendingDeleteMatrixIds, setPendingDeleteMatrixIds] = useState<string[] | null>(null);
+  const [queueOpenedFromMatrix, setQueueOpenedFromMatrix] = useState<boolean>(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'synced' | 'syncing' | 'local_only'>('syncing');
   const [statusMessage, setStatusMessage] = useState<string>('');
 
@@ -1086,10 +1089,14 @@ export default function App() {
   const exitVideoPlaybackFullscreen = useCallback(() => {
     setIsVideoPlaybackFullscreen(false);
     setPlayingQueue(null);
-    if (document.fullscreenElement) {
+    if (typeof document !== 'undefined' && document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
     }
-  }, []);
+    if (queueOpenedFromMatrix) {
+      setShowMatrixModal(true);
+      setQueueOpenedFromMatrix(false);
+    }
+  }, [queueOpenedFromMatrix]);
 
   const playNextQueueClip = useCallback(() => {
     if (!playingQueue || playingQueueIndex + 1 >= playingQueue.length) return;
@@ -1113,32 +1120,28 @@ export default function App() {
   }, [playingQueue, playingQueueIndex, events, selectedEventId, activateClipPlayback]);
 
   const playClipInFullscreen = useCallback(
-    (clip: ClipEvent) => {
+    (clip: ClipEvent, options?: { fromMatrix?: boolean }) => {
       setIsVideoPlaybackFullscreen(true);
+      setQueueOpenedFromMatrix(Boolean(options?.fromMatrix));
       setPlayingQueue([clip]);
       setPlayingQueueIndex(0);
       activateClipPlayback(clip, { fromQueue: true });
-      if (videoContainerRef.current && !document.fullscreenElement) {
-        videoContainerRef.current.requestFullscreen().catch(() => {});
-      }
       notify(`Viendo evento "${clip.name}" a pantalla completa`);
     },
     [activateClipPlayback, notify]
   );
 
-  const startPlayingClipQueue = (clips: ClipEvent[]) => {
+  const startPlayingClipQueue = (clips: ClipEvent[], options?: { fromMatrix?: boolean }) => {
     if (clips.length === 0) {
       notify('No hay cortes en este grupo para reproducir');
       return;
     }
     setIsVideoPlaybackFullscreen(true);
+    setQueueOpenedFromMatrix(Boolean(options?.fromMatrix));
     setPlayingQueue(clips);
     setPlayingQueueIndex(0);
     const first = clips[0];
     activateClipPlayback(first, { fromQueue: true });
-    if (videoContainerRef.current && !document.fullscreenElement) {
-      videoContainerRef.current.requestFullscreen().catch(() => {});
-    }
     notify(`Reproduciendo ${clips.length} evento(s) a pantalla completa de uno en uno`);
   };
 
@@ -3519,120 +3522,105 @@ ${xmlInstances}
       .filter((e): e is ClipEvent => Boolean(e));
   }, [activePlaylist, events]);
 
-  // Eliminar el corte que se está reproduciendo actualmente (desde pantalla completa o cola de la matriz)
-  const deleteCurrentPlayingClip = useCallback(() => {
-    try {
-      const cur = playingQueue
-        ? playingQueue[playingQueueIndex]
-        : events.find((e) => e.id === selectedEventId) || currentPlayingEvent;
-      if (!cur) return;
-
+  // Ejecutar eliminación de un corte específico (desde reproductor de matriz o de evento)
+  const executeDeleteClip = useCallback(
+    (cur: ClipEvent) => {
       try {
-        if (!window.confirm(`¿Seguro que deseas eliminar el corte "${cur.name || 'este corte'}"?`)) {
-          return;
+        const clipId = cur.id;
+        const clipMatchId = (cur as any).matchId || projectId;
+
+        // 1. Eliminar del partido actual en memoria
+        const nextEvents = events.filter((e) => e && e.id !== clipId);
+        if (nextEvents.length !== events.length) {
+          setEvents(nextEvents);
+          pushHistory({ events: nextEvents });
         }
-      } catch {
-        // En caso de que window.confirm no esté soportado en este visor
-      }
+        if (selectedEventId === clipId) {
+          setSelectedEventId(null);
+        }
 
-      const clipId = cur.id;
-      const clipMatchId = (cur as any).matchId || projectId;
-
-      // 1. Eliminar del partido actual en memoria
-      const nextEvents = events.filter((e) => e && e.id !== clipId);
-      if (nextEvents.length !== events.length) {
-        setEvents(nextEvents);
-        pushHistory({ events: nextEvents });
-      }
-      if (selectedEventId === clipId) {
-        setSelectedEventId(null);
-      }
-
-      // 2. Eliminar de otros partidos en catálogo si aplica
-      if (clipMatchId !== projectId) {
-        try {
-          const raw = localStorage.getItem('seneca_projects_catalog');
-          let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
-          if (Array.isArray(catalog)) {
-            let updated = false;
-            catalog = catalog.map((p) => {
-              if (p && p.id === clipMatchId && Array.isArray(p.events)) {
-                const nextProjEvents = p.events.filter((e) => e && e.id !== clipId);
-                if (nextProjEvents.length !== p.events.length) {
-                  updated = true;
-                  return { ...p, events: nextProjEvents };
+        // 2. Eliminar de otros partidos en catálogo si aplica
+        if (clipMatchId !== projectId) {
+          try {
+            const raw = localStorage.getItem('seneca_projects_catalog');
+            let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+            if (Array.isArray(catalog)) {
+              let updated = false;
+              catalog = catalog.map((p) => {
+                if (p && p.id === clipMatchId && Array.isArray(p.events)) {
+                  const nextProjEvents = p.events.filter((e) => e && e.id !== clipId);
+                  if (nextProjEvents.length !== p.events.length) {
+                    updated = true;
+                    return { ...p, events: nextProjEvents };
+                  }
                 }
+                return p;
+              });
+              if (updated) {
+                localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+                setSavedProjects(catalog);
               }
-              return p;
-            });
-            if (updated) {
-              localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
-              setSavedProjects(catalog);
+            }
+          } catch (err) {
+            console.warn('Error eliminando corte de catálogo:', err);
+          }
+        }
+
+        // 3. Manejar la cola si estamos en reproducción de cola
+        if (playingQueue && playingQueue.length > 0) {
+          const nextQueue = playingQueue.filter((c) => c && c.id !== clipId);
+          if (nextQueue.length === 0) {
+            setPlayingQueue(null);
+            setIsVideoPlaybackFullscreen(false);
+            if (typeof document !== 'undefined' && document.fullscreenElement) {
+              document.exitFullscreen().catch(() => {});
+            }
+            if (queueOpenedFromMatrix) {
+              setShowMatrixModal(true);
+              setQueueOpenedFromMatrix(false);
+            }
+          } else {
+            const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
+            setPlayingQueue(nextQueue);
+            setPlayingQueueIndex(nextIdx);
+            if (nextQueue[nextIdx]) {
+              activateClipPlayback(nextQueue[nextIdx], { fromQueue: true });
             }
           }
-        } catch (err) {
-          console.warn('Error eliminando corte de catálogo:', err);
-        }
-      }
-
-      // 3. Manejar la cola si estamos en reproducción de cola de matriz
-      if (playingQueue && playingQueue.length > 0) {
-        const nextQueue = playingQueue.filter((_, idx) => idx !== playingQueueIndex);
-        if (nextQueue.length === 0) {
-          setPlayingQueue(null);
+        } else {
           setIsVideoPlaybackFullscreen(false);
           if (typeof document !== 'undefined' && document.fullscreenElement) {
             document.exitFullscreen().catch(() => {});
           }
-        } else {
-          const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
-          setPlayingQueue(nextQueue);
-          setPlayingQueueIndex(nextIdx);
-          if (nextQueue[nextIdx]) {
-            activateClipPlayback(nextQueue[nextIdx], { fromQueue: true });
+          if (queueOpenedFromMatrix) {
+            setShowMatrixModal(true);
+            setQueueOpenedFromMatrix(false);
           }
         }
-      } else {
-        setIsVideoPlaybackFullscreen(false);
-        if (typeof document !== 'undefined' && document.fullscreenElement) {
-          document.exitFullscreen().catch(() => {});
-        }
+
+        notify(`Corte "${cur.name || 'Acción'}" eliminado correctamente`);
+      } catch (err) {
+        console.error('Error al eliminar corte:', err);
+        notify('No se pudo eliminar el corte');
       }
+    },
+    [
+      events,
+      projectId,
+      selectedEventId,
+      playingQueue,
+      playingQueueIndex,
+      queueOpenedFromMatrix,
+      pushHistory,
+      activateClipPlayback,
+      notify,
+    ]
+  );
 
-      notify(`Corte "${cur.name || 'Acción'}" eliminado correctamente`);
-    } catch (err) {
-      console.error('Error al eliminar corte:', err);
-      notify('No se pudo eliminar el corte');
-    }
-  }, [
-    playingQueue,
-    playingQueueIndex,
-    events,
-    selectedEventId,
-    currentPlayingEvent,
-    projectId,
-    pushHistory,
-    activateClipPlayback,
-    notify,
-  ]);
-
-  // Eliminar uno o varios cortes seleccionados desde la Matriz
-  const deleteClipsByIds = useCallback(
+  // Ejecutar eliminación de varios cortes seleccionados desde la Matriz
+  const executeDeleteClipsByIds = useCallback(
     (clipIds: string[]) => {
       if (!clipIds || clipIds.length === 0) return;
-      const count = clipIds.length;
-      try {
-        if (
-          !window.confirm(
-            `¿Seguro que deseas eliminar ${count === 1 ? 'este corte' : `estos ${count} cortes`} de la matriz?`
-          )
-        ) {
-          return;
-        }
-      } catch {
-        // En caso de que confirm no esté disponible
-      }
-
       try {
         const idsSet = new Set(clipIds);
 
@@ -3685,7 +3673,7 @@ ${xmlInstances}
         }
 
         setMatrixSelectedCutIds((prev) => prev.filter((id) => !idsSet.has(id)));
-        notify(`${count === 1 ? 'Corte eliminado' : `${count} cortes eliminados`} con éxito`);
+        notify(`${clipIds.length === 1 ? 'Corte eliminado' : `${clipIds.length} cortes eliminados`} con éxito`);
       } catch (err) {
         console.error('Error al eliminar cortes de matriz:', err);
         notify('Hubo un error al eliminar los cortes');
@@ -3693,6 +3681,23 @@ ${xmlInstances}
     },
     [events, selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify]
   );
+
+  const deleteClipsByIds = useCallback((clipIds: string[]) => {
+    if (!clipIds || clipIds.length === 0) return;
+    setPendingDeleteMatrixIds(clipIds);
+  }, []);
+
+  const deleteCurrentPlayingClip = useCallback(() => {
+    const cur =
+      (playingQueue && playingQueue[playingQueueIndex]) ||
+      events.find((e) => e.id === selectedEventId) ||
+      currentPlayingEvent;
+    if (!cur) {
+      notify('No hay ningún corte activo para eliminar');
+      return;
+    }
+    setPendingDeleteClip(cur);
+  }, [playingQueue, playingQueueIndex, events, selectedEventId, currentPlayingEvent, notify]);
 
   const renderNacsportBotonera = (isFs: boolean) => {
     const colClass =
@@ -8029,7 +8034,7 @@ ${xmlInstances}
                       <button
                         onClick={() => {
                           setShowMatrixModal(false);
-                          startPlayingClipQueue(clips);
+                          startPlayingClipQueue(clips, { fromMatrix: true });
                         }}
                         style={{ backgroundColor: badgeColor }}
                         className="px-3 py-1 rounded text-white font-bold hover:opacity-90 transition inline-flex items-center gap-1 shadow-sm"
@@ -8140,7 +8145,7 @@ ${xmlInstances}
                                         key={cat.id}
                                         onClick={() => {
                                           setShowMatrixModal(false);
-                                          startPlayingClipQueue(catClips);
+                                          startPlayingClipQueue(catClips, { fromMatrix: true });
                                         }}
                                         className="px-2 py-0.5 rounded border border-gray-300 bg-gray-50 hover:bg-gray-100 text-[11px] flex items-center gap-1 transition"
                                         title={`Reproducir ${cat.name} de ${pos}`}
@@ -8172,7 +8177,7 @@ ${xmlInstances}
                                     <button
                                       onClick={() => {
                                         setShowMatrixModal(false);
-                                        startPlayingClipQueue(allPos);
+                                        startPlayingClipQueue(allPos, { fromMatrix: true });
                                       }}
                                       className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded flex items-center gap-1"
                                       title={`Reproducir todos los cortes de ${pos}`}
@@ -8240,7 +8245,7 @@ ${xmlInstances}
                                 <button
                                   onClick={() => {
                                     setShowMatrixModal(false);
-                                    startPlayingClipQueue(unassignedClips);
+                                    startPlayingClipQueue(unassignedClips, { fromMatrix: true });
                                   }}
                                   className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded inline-flex items-center gap-1"
                                 >
@@ -8321,7 +8326,7 @@ ${xmlInstances}
                               <button
                                 onClick={() => {
                                   setShowMatrixModal(false);
-                                  startPlayingClipQueue(clips);
+                                  startPlayingClipQueue(clips, { fromMatrix: true });
                                 }}
                                 style={{ backgroundColor: badgeColor }}
                                 className="px-3 py-1 rounded text-white font-bold hover:opacity-90 transition inline-flex items-center gap-1 shadow-sm"
@@ -8359,7 +8364,7 @@ ${xmlInstances}
                                       key={posName}
                                       onClick={() => {
                                         setShowMatrixModal(false);
-                                        startPlayingClipQueue(info.clips);
+                                        startPlayingClipQueue(info.clips, { fromMatrix: true });
                                       }}
                                       className={`px-2 py-0.5 rounded border text-[10.5px] flex items-center gap-1 transition ${
                                         posName === 'Sin posición'
@@ -8397,7 +8402,7 @@ ${xmlInstances}
                                   <button
                                     onClick={() => {
                                       setShowMatrixModal(false);
-                                      startPlayingClipQueue(allCat);
+                                      startPlayingClipQueue(allCat, { fromMatrix: true });
                                     }}
                                     className="px-2.5 py-1 bg-[#15181d] text-[#f5b800] font-bold rounded flex items-center gap-1"
                                   >
@@ -8479,7 +8484,7 @@ ${xmlInstances}
                                         <button
                                           onClick={() => {
                                             setShowMatrixModal(false);
-                                            startPlayingClipQueue(okClips);
+                                            startPlayingClipQueue(okClips, { fromMatrix: true });
                                           }}
                                           className="px-1.5 py-0.5 rounded bg-emerald-600 text-white font-bold text-[10px] hover:bg-emerald-700"
                                           title={`Reproducir ${okClips.length} con acierto de ${pos} en ${cat.name}`}
@@ -8491,7 +8496,7 @@ ${xmlInstances}
                                         <button
                                           onClick={() => {
                                             setShowMatrixModal(false);
-                                            startPlayingClipQueue(failClips);
+                                            startPlayingClipQueue(failClips, { fromMatrix: true });
                                           }}
                                           className="px-1.5 py-0.5 rounded bg-[#cc2016] text-white font-bold text-[10px] hover:bg-red-800"
                                           title={`Reproducir ${failClips.length} no acertadas de ${pos} en ${cat.name}`}
@@ -8503,7 +8508,7 @@ ${xmlInstances}
                                         <button
                                           onClick={() => {
                                             setShowMatrixModal(false);
-                                            startPlayingClipQueue(cellClips);
+                                            startPlayingClipQueue(cellClips, { fromMatrix: true });
                                           }}
                                           className="px-1.5 py-0.5 rounded bg-gray-600 text-white font-bold text-[10px]"
                                         >
@@ -8603,7 +8608,7 @@ ${xmlInstances}
                                         <button
                                           onClick={() => {
                                             setShowMatrixModal(false);
-                                            startPlayingClipQueue(matchClips);
+                                            startPlayingClipQueue(matchClips, { fromMatrix: true });
                                           }}
                                           className="px-2 py-0.5 rounded bg-gray-900 text-white font-bold text-xs hover:bg-[#cc2016] transition flex items-center gap-1 shadow-sm"
                                           title={`Reproducir ${matchClips.length} cortes de ${cat.name} en este partido`}
@@ -8625,7 +8630,7 @@ ${xmlInstances}
                                   <button
                                     onClick={() => {
                                       setShowMatrixModal(false);
-                                      startPlayingClipQueue(allCatClips);
+                                      startPlayingClipQueue(allCatClips, { fromMatrix: true });
                                     }}
                                     className="px-3 py-1 rounded bg-[#cc2016] text-white font-bold text-xs hover:bg-[#a81810] shadow-sm transition inline-flex items-center gap-1"
                                     title={`Reproducir los ${allCatClips.length} cortes unidos de ${cat.name} de todos los partidos señalados`}
@@ -8834,7 +8839,7 @@ ${xmlInstances}
                                         type="button"
                                         onClick={() => {
                                           setShowMatrixModal(false);
-                                          playClipInFullscreen(clip);
+                                          playClipInFullscreen(clip, { fromMatrix: true });
                                         }}
                                         className="px-2 py-1 bg-gray-900 hover:bg-gray-800 text-white rounded text-[11px] font-bold flex items-center gap-1 transition"
                                         title="Ver corte a pantalla completa"
@@ -9962,6 +9967,124 @@ CREATE POLICY "Acceso total para Analisis Seneca CF"
                 className="px-4 py-1.5 bg-[#cc2016] text-white font-condensed font-bold text-xs uppercase rounded"
               >
                 Entendido
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de confirmación in-app para eliminar un corte (evita window.confirm para no bloquear WebKit ni pantalla completa) */}
+      {pendingDeleteClip && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[99999] animate-in fade-in duration-150">
+          <div className="bg-[#181d28] border border-red-500/40 rounded-xl max-w-md w-full p-5 shadow-2xl text-white">
+            <div className="flex items-center gap-3 mb-3 text-red-500">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center border border-red-500/30 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-condensed font-extrabold text-base uppercase tracking-wider text-white">
+                  ¿Eliminar este corte?
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Esta acción eliminará el evento de la línea de tiempo y de la matriz.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-[#11141c] border border-white/10 rounded-lg p-3 my-4 space-y-1.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Acción:</span>
+                <span className="font-bold text-[#f5b800]">{pendingDeleteClip.name || pendingDeleteClip.category}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Categoría:</span>
+                <span
+                  style={{ backgroundColor: pendingDeleteClip.color || '#cc2016' }}
+                  className="px-2 py-0.2 rounded text-[10px] font-condensed font-bold uppercase text-white"
+                >
+                  {pendingDeleteClip.category}
+                </span>
+              </div>
+              {pendingDeleteClip.player && (
+                <div className="flex items-center justify-between">
+                  <span className="text-gray-400">Jugador / Posición:</span>
+                  <span className="text-gray-200">{pendingDeleteClip.player}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-gray-400">Tiempo:</span>
+                <span className="font-mono text-gray-300">
+                  {formatTimecode(pendingDeleteClip.startTime)} - {formatTimecode(pendingDeleteClip.endTime)} ({(pendingDeleteClip.endTime - pendingDeleteClip.startTime).toFixed(1)}s)
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteClip(null)}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-xs font-condensed font-bold uppercase tracking-wider transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const clip = pendingDeleteClip;
+                  setPendingDeleteClip(null);
+                  if (clip) executeDeleteClip(clip);
+                }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-condensed font-bold uppercase tracking-wider shadow-lg transition flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Sí, eliminar corte</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de confirmación in-app para eliminar cortes masivos desde la Matriz */}
+      {pendingDeleteMatrixIds && pendingDeleteMatrixIds.length > 0 && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[99999] animate-in fade-in duration-150">
+          <div className="bg-[#181d28] border border-red-500/40 rounded-xl max-w-md w-full p-5 shadow-2xl text-white">
+            <div className="flex items-center gap-3 mb-3 text-red-500">
+              <div className="w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center border border-red-500/30 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-condensed font-extrabold text-base uppercase tracking-wider text-white">
+                  ¿Eliminar {pendingDeleteMatrixIds.length === 1 ? 'este corte' : `${pendingDeleteMatrixIds.length} cortes`}?
+                </h3>
+                <p className="text-xs text-gray-400">
+                  Esta acción no se puede deshacer. Los cortes se borrarán de la matriz y del partido.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-[#11141c] border border-white/10 rounded-lg p-3 my-4 text-xs text-gray-300">
+              Se eliminarán permanentemente <strong className="text-red-400 font-bold">{pendingDeleteMatrixIds.length}</strong> corte(s) seleccionados.
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteMatrixIds(null)}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-300 rounded-lg text-xs font-condensed font-bold uppercase tracking-wider transition"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const ids = pendingDeleteMatrixIds;
+                  setPendingDeleteMatrixIds(null);
+                  if (ids && ids.length > 0) executeDeleteClipsByIds(ids);
+                }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-condensed font-bold uppercase tracking-wider shadow-lg transition flex items-center gap-1.5"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Sí, eliminar {pendingDeleteMatrixIds.length > 1 ? 'cortes' : 'corte'}</span>
               </button>
             </div>
           </div>
