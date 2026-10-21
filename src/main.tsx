@@ -49,6 +49,7 @@ class RootErrorBoundary extends React.Component<{ children: React.ReactNode }, E
       } catch {}
     }
     this.setState({ hasError: false, errorMessage: '' });
+    window.location.reload();
   };
 
   render() {

@@ -2248,22 +2248,27 @@ export default function App() {
     return Array.from(new Set([...SENECA_PLAYERS, ...fromRoster, ...fromEvents]));
   }, [rosterPlayers, events]);
 
-  const getClipOutcome = useCallback((descriptors?: string[]): 'positivo' | 'negativo' | 'neutro' => {
-    const list = descriptors || [];
-    if (list.some((d) => d.includes('Positivo') || d.includes('Éxito'))) return 'positivo';
-    if (list.some((d) => d.includes('Negativo') || d.includes('Pérdida') || d.includes('Fallo'))) return 'negativo';
+  const getClipOutcome = useCallback((descriptors?: any): 'positivo' | 'negativo' | 'neutro' => {
+    if (!Array.isArray(descriptors)) return 'neutro';
+    if (descriptors.some((d) => typeof d === 'string' && (d.includes('Positivo') || d.includes('Éxito')))) return 'positivo';
+    if (descriptors.some((d) => typeof d === 'string' && (d.includes('Negativo') || d.includes('Pérdida') || d.includes('Fallo')))) return 'negativo';
     return 'neutro';
   }, []);
 
   const applyOutcomeToDescriptors = useCallback(
-    (descriptors: string[] | undefined, outcome: 'positivo' | 'negativo' | 'neutro'): string[] => {
-      const cleaned = (descriptors || []).filter(
+    (descriptors: any, outcome: 'positivo' | 'negativo' | 'neutro'): string[] => {
+      const list = Array.isArray(descriptors) ? descriptors : [];
+      const cleaned = list.filter(
         (d) =>
+          typeof d === 'string' &&
           d !== 'Éxito / Positivo' &&
           d !== 'Pérdida / Fallo' &&
           d !== 'Negativo / Fallo' &&
           !d.includes('Positivo') &&
-          !d.includes('Negativo')
+          !d.includes('Negativo') &&
+          !d.includes('Éxito') &&
+          !d.includes('Pérdida') &&
+          !d.includes('Fallo')
       );
       if (outcome === 'positivo') return ['Éxito / Positivo', ...cleaned];
       if (outcome === 'negativo') return ['Pérdida / Fallo', ...cleaned];
@@ -3516,70 +3521,89 @@ ${xmlInstances}
 
   // Eliminar el corte que se está reproduciendo actualmente (desde pantalla completa o cola de la matriz)
   const deleteCurrentPlayingClip = useCallback(() => {
-    const cur = playingQueue
-      ? playingQueue[playingQueueIndex]
-      : events.find((e) => e.id === selectedEventId) || currentPlayingEvent;
-    if (!cur) return;
+    try {
+      const cur = playingQueue
+        ? playingQueue[playingQueueIndex]
+        : events.find((e) => e.id === selectedEventId) || currentPlayingEvent;
+      if (!cur) return;
 
-    if (!window.confirm(`¿Seguro que deseas eliminar el corte "${cur.name}"?`)) {
-      return;
-    }
-
-    const clipId = cur.id;
-    const clipMatchId = (cur as any).matchId || projectId;
-
-    // 1. Eliminar del partido actual
-    if (clipMatchId === projectId || events.some((e) => e.id === clipId)) {
-      handleDeleteClip(clipId);
-    }
-
-    // 2. Eliminar de otros partidos en catálogo
-    if (clipMatchId !== projectId) {
       try {
-        const raw = localStorage.getItem('seneca_projects_catalog');
-        let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
-        if (Array.isArray(catalog)) {
-          let updated = false;
-          catalog = catalog.map((p) => {
-            if (p.id === clipMatchId && Array.isArray(p.events)) {
-              updated = true;
-              return { ...p, events: p.events.filter((e) => e.id !== clipId) };
+        if (!window.confirm(`¿Seguro que deseas eliminar el corte "${cur.name || 'este corte'}"?`)) {
+          return;
+        }
+      } catch {
+        // En caso de que window.confirm no esté soportado en este visor
+      }
+
+      const clipId = cur.id;
+      const clipMatchId = (cur as any).matchId || projectId;
+
+      // 1. Eliminar del partido actual en memoria
+      const nextEvents = events.filter((e) => e && e.id !== clipId);
+      if (nextEvents.length !== events.length) {
+        setEvents(nextEvents);
+        pushHistory({ events: nextEvents });
+      }
+      if (selectedEventId === clipId) {
+        setSelectedEventId(null);
+      }
+
+      // 2. Eliminar de otros partidos en catálogo si aplica
+      if (clipMatchId !== projectId) {
+        try {
+          const raw = localStorage.getItem('seneca_projects_catalog');
+          let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(catalog)) {
+            let updated = false;
+            catalog = catalog.map((p) => {
+              if (p && p.id === clipMatchId && Array.isArray(p.events)) {
+                const nextProjEvents = p.events.filter((e) => e && e.id !== clipId);
+                if (nextProjEvents.length !== p.events.length) {
+                  updated = true;
+                  return { ...p, events: nextProjEvents };
+                }
+              }
+              return p;
+            });
+            if (updated) {
+              localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+              setSavedProjects(catalog);
             }
-            return p;
-          });
-          if (updated) {
-            localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
-            setSavedProjects(catalog);
+          }
+        } catch (err) {
+          console.warn('Error eliminando corte de catálogo:', err);
+        }
+      }
+
+      // 3. Manejar la cola si estamos en reproducción de cola de matriz
+      if (playingQueue && playingQueue.length > 0) {
+        const nextQueue = playingQueue.filter((_, idx) => idx !== playingQueueIndex);
+        if (nextQueue.length === 0) {
+          setPlayingQueue(null);
+          setIsVideoPlaybackFullscreen(false);
+          if (typeof document !== 'undefined' && document.fullscreenElement) {
+            document.exitFullscreen().catch(() => {});
+          }
+        } else {
+          const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
+          setPlayingQueue(nextQueue);
+          setPlayingQueueIndex(nextIdx);
+          if (nextQueue[nextIdx]) {
+            activateClipPlayback(nextQueue[nextIdx], { fromQueue: true });
           }
         }
-      } catch (err) {
-        console.warn('Error eliminando corte de catálogo:', err);
-      }
-    }
-
-    // 3. Manejar la cola si estamos en reproducción de cola de matriz
-    if (playingQueue && playingQueue.length > 0) {
-      const nextQueue = playingQueue.filter((_, idx) => idx !== playingQueueIndex);
-      if (nextQueue.length === 0) {
-        setPlayingQueue(null);
+      } else {
         setIsVideoPlaybackFullscreen(false);
-        if (document.fullscreenElement) {
+        if (typeof document !== 'undefined' && document.fullscreenElement) {
           document.exitFullscreen().catch(() => {});
         }
-      } else {
-        const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
-        setPlayingQueue(nextQueue);
-        setPlayingQueueIndex(nextIdx);
-        activateClipPlayback(nextQueue[nextIdx], { fromQueue: true });
       }
-    } else {
-      setIsVideoPlaybackFullscreen(false);
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
-      }
-    }
 
-    notify(`Corte "${cur.name}" eliminado correctamente`);
+      notify(`Corte "${cur.name || 'Acción'}" eliminado correctamente`);
+    } catch (err) {
+      console.error('Error al eliminar corte:', err);
+      notify('No se pudo eliminar el corte');
+    }
   }, [
     playingQueue,
     playingQueueIndex,
@@ -3587,7 +3611,7 @@ ${xmlInstances}
     selectedEventId,
     currentPlayingEvent,
     projectId,
-    handleDeleteClip,
+    pushHistory,
     activateClipPlayback,
     notify,
   ]);
@@ -3595,69 +3619,79 @@ ${xmlInstances}
   // Eliminar uno o varios cortes seleccionados desde la Matriz
   const deleteClipsByIds = useCallback(
     (clipIds: string[]) => {
-      if (clipIds.length === 0) return;
+      if (!clipIds || clipIds.length === 0) return;
       const count = clipIds.length;
-      if (
-        !window.confirm(
-          `¿Seguro que deseas eliminar ${count === 1 ? 'este corte' : `estos ${count} cortes`} de la matriz?`
-        )
-      ) {
-        return;
-      }
-      const idsSet = new Set(clipIds);
-
-      // 1. Eliminar de events (partido actual)
-      setEvents((prev) => {
-        const next = prev.filter((e) => !idsSet.has(e.id));
-        pushHistory({ events: next });
-        return next;
-      });
-      if (selectedEventId && idsSet.has(selectedEventId)) {
-        setSelectedEventId(null);
-      }
-
-      // 2. Eliminar de catálogo (otros partidos si aplica)
       try {
-        const raw = localStorage.getItem('seneca_projects_catalog');
-        let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
-        if (Array.isArray(catalog)) {
-          let changed = false;
-          catalog = catalog.map((p) => {
-            if (Array.isArray(p.events)) {
-              const nextEvents = p.events.filter((e) => !idsSet.has(e.id));
-              if (nextEvents.length !== p.events.length) {
-                changed = true;
-                return { ...p, events: nextEvents };
+        if (
+          !window.confirm(
+            `¿Seguro que deseas eliminar ${count === 1 ? 'este corte' : `estos ${count} cortes`} de la matriz?`
+          )
+        ) {
+          return;
+        }
+      } catch {
+        // En caso de que confirm no esté disponible
+      }
+
+      try {
+        const idsSet = new Set(clipIds);
+
+        // 1. Eliminar de events (partido actual)
+        const nextEvents = events.filter((e) => e && !idsSet.has(e.id));
+        if (nextEvents.length !== events.length) {
+          setEvents(nextEvents);
+          pushHistory({ events: nextEvents });
+        }
+        if (selectedEventId && idsSet.has(selectedEventId)) {
+          setSelectedEventId(null);
+        }
+
+        // 2. Eliminar de catálogo (otros partidos si aplica)
+        try {
+          const raw = localStorage.getItem('seneca_projects_catalog');
+          let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(catalog)) {
+            let changed = false;
+            catalog = catalog.map((p) => {
+              if (p && Array.isArray(p.events)) {
+                const nextProjEvents = p.events.filter((e) => e && !idsSet.has(e.id));
+                if (nextProjEvents.length !== p.events.length) {
+                  changed = true;
+                  return { ...p, events: nextProjEvents };
+                }
               }
+              return p;
+            });
+            if (changed) {
+              localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+              setSavedProjects(catalog);
             }
-            return p;
-          });
-          if (changed) {
-            localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
-            setSavedProjects(catalog);
+          }
+        } catch (err) {
+          console.warn('Error eliminando cortes de catálogo:', err);
+        }
+
+        // 3. Si alguno estaba en la cola de reproducción actual
+        if (playingQueue) {
+          const nextQueue = playingQueue.filter((c) => c && !idsSet.has(c.id));
+          if (nextQueue.length === 0) {
+            setPlayingQueue(null);
+            setIsVideoPlaybackFullscreen(false);
+          } else {
+            const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
+            setPlayingQueue(nextQueue);
+            setPlayingQueueIndex(nextIdx);
           }
         }
+
+        setMatrixSelectedCutIds((prev) => prev.filter((id) => !idsSet.has(id)));
+        notify(`${count === 1 ? 'Corte eliminado' : `${count} cortes eliminados`} con éxito`);
       } catch (err) {
-        console.warn('Error eliminando cortes de catálogo:', err);
+        console.error('Error al eliminar cortes de matriz:', err);
+        notify('Hubo un error al eliminar los cortes');
       }
-
-      // 3. Si alguno estaba en la cola de reproducción actual
-      if (playingQueue) {
-        const nextQueue = playingQueue.filter((c) => !idsSet.has(c.id));
-        if (nextQueue.length === 0) {
-          setPlayingQueue(null);
-          setIsVideoPlaybackFullscreen(false);
-        } else {
-          const nextIdx = Math.min(playingQueueIndex, nextQueue.length - 1);
-          setPlayingQueue(nextQueue);
-          setPlayingQueueIndex(nextIdx);
-        }
-      }
-
-      setMatrixSelectedCutIds((prev) => prev.filter((id) => !idsSet.has(id)));
-      notify(`${count === 1 ? 'Corte eliminado' : `${count} cortes eliminados`} con éxito`);
     },
-    [selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify]
+    [events, selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify]
   );
 
   const renderNacsportBotonera = (isFs: boolean) => {
@@ -8613,19 +8647,23 @@ ${xmlInstances}
               )}
 
               {matrixViewMode === 'eliminar' && (() => {
-                const filtered = matrixClips.filter((c) => {
+                const safeClips = Array.isArray(matrixClips) ? matrixClips.filter(Boolean) : [];
+                const filtered = safeClips.filter((c) => {
+                  if (!c) return false;
                   if (matrixCutFilterCategory !== 'ALL' && c.category !== matrixCutFilterCategory) return false;
                   const outcome = getClipOutcome(c.descriptors);
                   if (matrixCutFilterOutcome !== 'ALL' && outcome !== matrixCutFilterOutcome) return false;
-                  if (matrixCutSearch.trim()) {
-                    const q = matrixCutSearch.toLowerCase();
-                    const matchText = `${c.name} ${c.player || ''} ${(c.descriptors || []).join(' ')} ${c.matchName || ''} ${c.notes || ''}`.toLowerCase();
+                  if (matrixCutSearch && matrixCutSearch.trim()) {
+                    const q = matrixCutSearch.toLowerCase().trim();
+                    const descStr = Array.isArray(c.descriptors) ? c.descriptors.filter(Boolean).join(' ') : '';
+                    const matchText = `${c.name || ''} ${c.player || ''} ${descStr} ${c.matchName || ''} ${c.notes || ''}`.toLowerCase();
                     if (!matchText.includes(q)) return false;
                   }
                   return true;
                 });
 
-                const allFilteredSelected = filtered.length > 0 && filtered.every((c) => matrixSelectedCutIds.includes(c.id));
+                const allFilteredSelected =
+                  filtered.length > 0 && filtered.every((c) => c && matrixSelectedCutIds.includes(c.id));
 
                 return (
                   <div className="flex-1 flex flex-col min-h-0 bg-white">
@@ -8641,9 +8679,9 @@ ${xmlInstances}
                           onChange={(e) => setMatrixCutFilterCategory(e.target.value)}
                           className="border border-gray-300 rounded px-2 py-1 bg-white text-gray-800 text-xs font-medium"
                         >
-                          <option value="ALL">Todas las Categorías ({matrixClips.length})</option>
+                          <option value="ALL">Todas las Categorías ({safeClips.length})</option>
                           {tagCategories.map((cat) => {
-                            const cnt = matrixClips.filter((c) => c.category === cat.name).length;
+                            const cnt = safeClips.filter((c) => c && c.category === cat.name).length;
                             return (
                               <option key={cat.id} value={cat.name}>
                                 {cat.name} ({cnt})
@@ -8678,9 +8716,9 @@ ${xmlInstances}
                           type="button"
                           onClick={() => {
                             if (allFilteredSelected) {
-                              setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c.id === id)));
+                              setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c && c.id === id)));
                             } else {
-                              const next = new Set([...matrixSelectedCutIds, ...filtered.map((c) => c.id)]);
+                              const next = new Set([...matrixSelectedCutIds, ...filtered.filter(Boolean).map((c) => c.id)]);
                               setMatrixSelectedCutIds(Array.from(next));
                             }
                           }}
@@ -8713,9 +8751,9 @@ ${xmlInstances}
                                 checked={allFilteredSelected}
                                 onChange={() => {
                                   if (allFilteredSelected) {
-                                    setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c.id === id)));
+                                    setMatrixSelectedCutIds((prev) => prev.filter((id) => !filtered.some((c) => c && c.id === id)));
                                   } else {
-                                    const next = new Set([...matrixSelectedCutIds, ...filtered.map((c) => c.id)]);
+                                    const next = new Set([...matrixSelectedCutIds, ...filtered.filter(Boolean).map((c) => c.id)]);
                                     setMatrixSelectedCutIds(Array.from(next));
                                   }
                                 }}
@@ -8739,8 +8777,13 @@ ${xmlInstances}
                             </tr>
                           ) : (
                             filtered.map((clip) => {
+                              if (!clip) return null;
                               const isChecked = matrixSelectedCutIds.includes(clip.id);
                               const outcome = getClipOutcome(clip.descriptors);
+                              const safeStart = Number(clip.startTime) || 0;
+                              const safeEnd = Number(clip.endTime) || safeStart;
+                              const safeDur = Math.max(0, safeEnd - safeStart).toFixed(1);
+
                               return (
                                 <tr key={clip.id} className={`hover:bg-red-50/40 transition ${isChecked ? 'bg-red-50/70' : ''}`}>
                                   <td className="p-2 text-center">
@@ -8759,10 +8802,10 @@ ${xmlInstances}
                                       style={{ backgroundColor: clip.color || '#cc2016' }}
                                       className="text-white font-condensed font-bold text-[10px] uppercase px-2 py-0.5 rounded shadow-sm inline-block"
                                     >
-                                      {clip.category}
+                                      {clip.category || 'Acción'}
                                     </span>
                                   </td>
-                                  <td className="p-2 font-bold text-gray-900">{clip.name}</td>
+                                  <td className="p-2 font-bold text-gray-900">{clip.name || 'Sin nombre'}</td>
                                   <td className="p-2 text-gray-700">{clip.player || '—'}</td>
                                   <td className="p-2">
                                     {outcome === 'positivo' && (
@@ -8778,10 +8821,10 @@ ${xmlInstances}
                                     {outcome === 'neutro' && <span className="text-gray-400 text-[11px]">—</span>}
                                   </td>
                                   <td className="p-2 text-gray-600 font-mono text-[11px]">
-                                    {formatTimecode(clip.startTime, false)} - {formatTimecode(clip.endTime, false)} ({Math.max(0, clip.endTime - clip.startTime).toFixed(1)}s)
+                                    {formatTimecode(safeStart, false)} - {formatTimecode(safeEnd, false)} ({safeDur}s)
                                   </td>
                                   {activeMatrixProjectIds.length > 1 && (
-                                    <td className="p-2 text-gray-600 truncate max-w-[140px]" title={clip.matchName}>
+                                    <td className="p-2 text-gray-600 truncate max-w-[140px]" title={clip.matchName || ''}>
                                       {clip.matchName || 'Partido'}
                                     </td>
                                   )}
