@@ -139,6 +139,71 @@ function sanitizeLoadedEvents(rawEvents: unknown): ClipEvent[] {
   });
 }
 
+function stripHeavyMediaFromProject(proj: SenecaProject): SenecaProject {
+  return {
+    ...proj,
+    events: Array.isArray(proj.events)
+      ? proj.events.map(({ drawingDataUrl, ...rest }) => rest as ClipEvent)
+      : [],
+    captures: Array.isArray(proj.captures)
+      ? proj.captures.map(({ dataUrl, ...rest }) => rest as CaptureItem)
+      : [],
+  };
+}
+
+function getProjectContentSignature(proj: Partial<SenecaProject>): string {
+  const cleanEvents = Array.isArray(proj.events)
+    ? proj.events.map(({ drawingDataUrl, ...rest }) => rest)
+    : [];
+  const cleanCaptures = Array.isArray(proj.captures)
+    ? proj.captures.map(({ dataUrl, ...rest }) => rest)
+    : [];
+  return JSON.stringify({
+    id: proj.id || '',
+    name: proj.name || '',
+    rival: proj.rival || '',
+    competition: proj.competition || '',
+    events: cleanEvents,
+    captures: cleanCaptures,
+    drawings: proj.drawings || [],
+    markers: proj.markers || {},
+    tag_categories: proj.tag_categories || [],
+    playlists: proj.playlists || [],
+  });
+}
+
+function normalizeRemoteProject(raw: any): SenecaProject {
+  const rawEvents =
+    Array.isArray(raw?.events) && raw.events.length > 0
+      ? raw.events
+      : Array.isArray(raw?.clips) && raw.clips.length > 0
+      ? raw.clips
+      : Array.isArray(raw?.events)
+      ? raw.events
+      : [];
+  const rawCategories =
+    Array.isArray(raw?.tag_categories) && raw.tag_categories.length > 0
+      ? raw.tag_categories
+      : Array.isArray(raw?.categories) && raw.categories.length > 0
+      ? raw.categories
+      : DEFAULT_TAG_CATEGORIES;
+  return {
+    id: String(raw?.id || 'seneca-default-project'),
+    name: String(raw?.name || raw?.match_title || 'Partido Séneca CF'),
+    rival: String(raw?.rival || 'Rival FC'),
+    competition: String(raw?.competition || 'División de Honor / Liga Nacional'),
+    match_date: String(raw?.match_date || new Date().toISOString().split('T')[0]),
+    active_module: (raw?.active_module as 'editor' | 'con_video' | 'sin_video') || 'con_video',
+    events: sanitizeLoadedEvents(rawEvents),
+    captures: Array.isArray(raw?.captures) ? raw.captures : [],
+    drawings: Array.isArray(raw?.drawings) ? raw.drawings : [],
+    markers: raw?.markers && typeof raw.markers === 'object' ? raw.markers : {},
+    tag_categories: rawCategories,
+    playlists: Array.isArray(raw?.playlists) && raw.playlists.length > 0 ? raw.playlists : DEFAULT_PLAYLISTS,
+    updated_at: String(raw?.updated_at || new Date(0).toISOString()),
+  };
+}
+
 export default function App() {
   // Navegación principal (Botonera con vídeo activa por defecto)
   const [activeTab, setActiveTab] = useState<'editor' | 'con_video' | 'sin_video'>('con_video');
@@ -493,6 +558,19 @@ export default function App() {
     }
   }, []);
 
+  // Referencias para sincronización en tiempo real sin condiciones de carrera
+  const projectIdRef = useRef<string>(projectId);
+  const hasInitialCloudSyncRef = useRef<boolean>(false);
+  const isApplyingRemoteRef = useRef<boolean>(false);
+  const isDirtyLocalRef = useRef<boolean>(false);
+  const lastSyncedSignatureRef = useRef<string>('');
+  const realtimeChannelRef = useRef<any>(null);
+  const clientInstanceIdRef = useRef<string>(`client-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+
+  useEffect(() => {
+    projectIdRef.current = projectId;
+  }, [projectId]);
+
   const getProjectPayload = useCallback((): SenecaProject => {
     return {
       id: projectId,
@@ -513,14 +591,15 @@ export default function App() {
 
   const updateProjectInCatalog = useCallback((proj: SenecaProject) => {
     try {
+      const cleanProj = stripHeavyMediaFromProject(proj);
       const raw = localStorage.getItem('seneca_projects_catalog');
       let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
       if (!Array.isArray(catalog)) catalog = [];
-      const idx = catalog.findIndex((p) => p.id === proj.id);
+      const idx = catalog.findIndex((p) => p.id === cleanProj.id);
       if (idx >= 0) {
-        catalog[idx] = proj;
+        catalog[idx] = cleanProj;
       } else {
-        catalog.unshift(proj);
+        catalog.unshift(cleanProj);
       }
       localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
       setSavedProjects(catalog);
@@ -529,41 +608,340 @@ export default function App() {
     }
   }, []);
 
-  // Cargar desde LocalStorage, IndexedDB y sincronizar con Supabase al iniciar
+  const pushProjectToCloud = useCallback(async (proj: SenecaProject) => {
+    const cleanProj = stripHeavyMediaFromProject(proj);
+    try {
+      if (realtimeChannelRef.current) {
+        realtimeChannelRef.current
+          .send({
+            type: 'broadcast',
+            event: 'project_sync',
+            payload: {
+              senderId: clientInstanceIdRef.current,
+              project: cleanProj,
+            },
+          })
+          .catch(() => {});
+      }
+    } catch {
+      //
+    }
+
+    try {
+      const { error } = await supabase.from('seneca_projects').upsert(cleanProj, { onConflict: 'id' });
+      if (!error) {
+        setSupabaseStatus('synced');
+        return true;
+      }
+      // Fallback por si la tabla en Supabase tiene esquema antiguo (clips / categories)
+      const legacyPayload = {
+        id: cleanProj.id,
+        name: cleanProj.name,
+        match_title: `${cleanProj.name} (${cleanProj.rival || 'Rival FC'})`,
+        updated_at: cleanProj.updated_at,
+        markers: cleanProj.markers || {},
+        categories: cleanProj.tag_categories || [],
+        clips: cleanProj.events || [],
+        drawings: cleanProj.drawings || [],
+        playlists: cleanProj.playlists || [],
+        notes: JSON.stringify({
+          rival: cleanProj.rival,
+          competition: cleanProj.competition,
+          match_date: cleanProj.match_date,
+          active_module: cleanProj.active_module,
+        }),
+      };
+      const { error: legacyErr } = await supabase
+        .from('seneca_projects')
+        .upsert(legacyPayload, { onConflict: 'id' });
+      if (!legacyErr) {
+        setSupabaseStatus('synced');
+        return true;
+      }
+      setSupabaseStatus('local_only');
+      return false;
+    } catch {
+      setSupabaseStatus('local_only');
+      return false;
+    }
+  }, []);
+
+  const applyProjectToActiveState = useCallback(
+    async (targetProj: SenecaProject, options?: { switchId?: boolean }) => {
+      const cleanTarget = normalizeRemoteProject(targetProj);
+      const nextSig = getProjectContentSignature(cleanTarget);
+      const idChanged = cleanTarget.id !== projectIdRef.current;
+
+      if (!idChanged && nextSig === lastSyncedSignatureRef.current) {
+        return;
+      }
+
+      isApplyingRemoteRef.current = true;
+      lastSyncedSignatureRef.current = nextSig;
+      projectIdRef.current = cleanTarget.id;
+
+      setProjectId(cleanTarget.id);
+      setProjectName(cleanTarget.name || 'Jornada 1 - Séneca CF vs Rival');
+      setRivalName(cleanTarget.rival || 'Rival FC');
+      setCompetition(cleanTarget.competition || 'División de Honor / Liga Nacional');
+
+      setEvents((prevEvents) => {
+        const prevMap = new Map(prevEvents.map((e) => [e.id, e]));
+        return sanitizeLoadedEvents(cleanTarget.events).map((ev) => {
+          const existing = prevMap.get(ev.id);
+          if (existing?.drawingDataUrl && !ev.drawingDataUrl) {
+            return { ...ev, drawingDataUrl: existing.drawingDataUrl };
+          }
+          return ev;
+        });
+      });
+
+      setCaptures((prevCaps) => {
+        const prevMap = new Map(prevCaps.map((c) => [c.id, c]));
+        return (Array.isArray(cleanTarget.captures) ? cleanTarget.captures : []).map((cap) => {
+          const existing = prevMap.get(cap.id);
+          if (existing?.dataUrl && !cap.dataUrl) {
+            return { ...cap, dataUrl: existing.dataUrl };
+          }
+          return cap;
+        });
+      });
+
+      setDrawings(Array.isArray(cleanTarget.drawings) ? cleanTarget.drawings : []);
+      setMarkers(cleanTarget.markers || {});
+      if (cleanTarget.tag_categories && cleanTarget.tag_categories.length > 0) {
+        setTagCategories(
+          cleanTarget.tag_categories.map((c: TagCategory) => ({
+            ...c,
+            preRoll: c.preRoll || 10,
+            postRoll: c.postRoll || 10,
+          }))
+        );
+      }
+      if (cleanTarget.playlists && cleanTarget.playlists.length > 0) {
+        setPlaylists(cleanTarget.playlists);
+      }
+
+      try {
+        const storageTarget = stripHeavyMediaFromProject(cleanTarget);
+        localStorage.setItem('seneca_cf_current_project', JSON.stringify(storageTarget));
+        localStorage.setItem('seneca_cf_active_project_id', cleanTarget.id);
+      } catch {
+        //
+      }
+
+      if (idChanged || options?.switchId) {
+        try {
+          const loadedVideos = await getVideosForProject(cleanTarget.id);
+          setVideos(loadedVideos);
+          setActiveVideoId(loadedVideos.length > 0 ? loadedVideos[0].id : null);
+        } catch {
+          //
+        }
+      }
+
+      setTimeout(() => {
+        isApplyingRemoteRef.current = false;
+      }, 80);
+    },
+    []
+  );
+
+  const fetchProjectsFromSupabase = useCallback(
+    async (options?: { isInitial?: boolean; silent?: boolean }) => {
+      if (!options?.silent) {
+        setSupabaseStatus('syncing');
+      }
+      try {
+        const { data, error } = await supabase
+          .from('seneca_projects')
+          .select('*')
+          .order('updated_at', { ascending: false })
+          .limit(50);
+
+        if (error) {
+          setSupabaseStatus('local_only');
+          hasInitialCloudSyncRef.current = true;
+          return;
+        }
+
+        setSupabaseStatus('synced');
+        const remoteProjects = Array.isArray(data) ? data.map(normalizeRemoteProject) : [];
+        const rawCatalog = localStorage.getItem('seneca_projects_catalog');
+        let localCatalog: SenecaProject[] = rawCatalog ? JSON.parse(rawCatalog) : [];
+        if (!Array.isArray(localCatalog)) localCatalog = [];
+        localCatalog = localCatalog.map(normalizeRemoteProject);
+
+        // Asegurar que cualquier corte en seneca_cf_current_project también esté reflejado en localCatalog
+        try {
+          const rawCurrent = localStorage.getItem('seneca_cf_current_project');
+          if (rawCurrent) {
+            const parsedCurrent = normalizeRemoteProject(JSON.parse(rawCurrent));
+            const existingIdx = localCatalog.findIndex((p) => p.id === parsedCurrent.id);
+            if (existingIdx >= 0) {
+              if ((parsedCurrent.events?.length || 0) > (localCatalog[existingIdx].events?.length || 0)) {
+                localCatalog[existingIdx] = parsedCurrent;
+              }
+            } else if (parsedCurrent.id) {
+              localCatalog.unshift(parsedCurrent);
+            }
+          }
+        } catch {
+          //
+        }
+
+        const mergedMap = new Map<string, SenecaProject>();
+        const projectsToPushBack: SenecaProject[] = [];
+
+        remoteProjects.forEach((rp) => mergedMap.set(rp.id, rp));
+
+        localCatalog.forEach((lp) => {
+          const rp = mergedMap.get(lp.id);
+          const lEvents = Array.isArray(lp.events) ? lp.events.length : 0;
+          const rEvents = rp && Array.isArray(rp.events) ? rp.events.length : 0;
+
+          if (!rp) {
+            // Si es un partido local real (con cortes o creado por el usuario), conservarlo y subirlo a Supabase
+            const isEmptyDefault =
+              lp.id === 'seneca-default-project' &&
+              lEvents === 0 &&
+              (!lp.drawings || lp.drawings.length === 0) &&
+              remoteProjects.length > 0;
+            if (!isEmptyDefault) {
+              mergedMap.set(lp.id, lp);
+              if (lEvents > 0 || lp.id !== 'seneca-default-project') {
+                projectsToPushBack.push(lp);
+              }
+            }
+          } else {
+            // Ambos existen (en Mac/iPad local y en Supabase):
+            if (lEvents > 0 && rEvents === 0) {
+              // El dispositivo local (ej. Mac) tiene cortes pero la nube fue pisada con 0 cortes: recuperar cortes locales y subirlos
+              const recovered = { ...lp, updated_at: new Date().toISOString() };
+              mergedMap.set(lp.id, recovered);
+              projectsToPushBack.push(recovered);
+            } else if (rEvents > 0 && lEvents === 0) {
+              // La nube tiene los cortes (del Mac) y este dispositivo (ej. iPad) tiene 0: usar el de la nube
+              mergedMap.set(lp.id, rp);
+            } else if (options?.isInitial && lEvents > rEvents) {
+              // En arranque inicial, si la copia local tiene más cortes clasificados, preservar y sincronizar a la nube
+              const recovered = { ...lp, updated_at: new Date().toISOString() };
+              mergedMap.set(lp.id, recovered);
+              projectsToPushBack.push(recovered);
+            } else if (
+              options?.isInitial &&
+              lEvents === rEvents &&
+              new Date(lp.updated_at || 0).getTime() > new Date(rp.updated_at || 0).getTime()
+            ) {
+              mergedMap.set(lp.id, lp);
+            } else {
+              mergedMap.set(lp.id, rp);
+            }
+          }
+        });
+
+        const finalCatalog = Array.from(mergedMap.values()).sort(
+          (a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+        );
+
+        if (finalCatalog.length > 0) {
+          setSavedProjects(finalCatalog);
+          try {
+            localStorage.setItem(
+              'seneca_projects_catalog',
+              JSON.stringify(finalCatalog.map(stripHeavyMediaFromProject))
+            );
+          } catch {
+            //
+          }
+
+          // Actualizar el partido activo en pantalla si no hay cambios locales pendientes de subir
+          if (!isDirtyLocalRef.current) {
+            const currentId = projectIdRef.current;
+            let targetActive = finalCatalog.find((p) => p.id === currentId);
+
+            // Si el dispositivo tenía el proyecto por defecto vacío pero en la nube hay un partido con cortes, activarlo
+            if (
+              options?.isInitial &&
+              (!targetActive ||
+                (targetActive.id === 'seneca-default-project' &&
+                  (targetActive.events?.length || 0) === 0 &&
+                  finalCatalog.some((p) => (p.events?.length || 0) > 0)))
+            ) {
+              targetActive = finalCatalog.find((p) => (p.events?.length || 0) > 0) || finalCatalog[0];
+            } else if (!targetActive) {
+              targetActive = finalCatalog[0];
+            }
+
+            if (targetActive) {
+              await applyProjectToActiveState(targetActive, {
+                switchId: targetActive.id !== currentId,
+              });
+            }
+          }
+        }
+
+        hasInitialCloudSyncRef.current = true;
+
+        // Si se detectaron partidos/cortes locales que no estaban en Supabase, subirlos ahora
+        for (const projToPush of projectsToPushBack) {
+          await pushProjectToCloud(projToPush);
+        }
+      } catch {
+        setSupabaseStatus('local_only');
+        hasInitialCloudSyncRef.current = true;
+      }
+    },
+    [applyProjectToActiveState, pushProjectToCloud]
+  );
+
+  // Cargar desde LocalStorage, IndexedDB y activar sincronización en tiempo real con Supabase
   useEffect(() => {
     const initializeAppProjects = async () => {
       let catalog: SenecaProject[] = [];
       try {
         const rawCatalog = localStorage.getItem('seneca_projects_catalog');
         if (rawCatalog) {
-          catalog = JSON.parse(rawCatalog);
+          const parsed = JSON.parse(rawCatalog);
+          if (Array.isArray(parsed)) {
+            catalog = parsed.map(normalizeRemoteProject);
+          }
         }
       } catch (e) {
         console.warn('Error leyendo catálogo local:', e);
       }
 
-      // Si aún no hay catálogo local pero sí un proyecto suelto antiguo en localStorage
-      let activeProj: SenecaProject | null = null;
-      const savedActiveId = localStorage.getItem('seneca_cf_active_project_id');
-
-      if (catalog && catalog.length > 0) {
-        activeProj = catalog.find((p) => p.id === savedActiveId) || catalog[0];
-      } else {
-        try {
-          const currentRaw = localStorage.getItem('seneca_cf_current_project');
-          if (currentRaw) {
-            const parsed = JSON.parse(currentRaw);
-            if (parsed && parsed.id) {
-              activeProj = parsed;
-              catalog = [parsed];
+      // Si hay un proyecto en seneca_cf_current_project con más cortes, integrarlo
+      try {
+        const currentRaw = localStorage.getItem('seneca_cf_current_project');
+        if (currentRaw) {
+          const parsedCurrent = normalizeRemoteProject(JSON.parse(currentRaw));
+          if (parsedCurrent && parsedCurrent.id) {
+            const idx = catalog.findIndex((p) => p.id === parsedCurrent.id);
+            if (idx >= 0) {
+              if ((parsedCurrent.events?.length || 0) >= (catalog[idx].events?.length || 0)) {
+                catalog[idx] = parsedCurrent;
+              }
+            } else {
+              catalog.unshift(parsedCurrent);
             }
           }
-        } catch (e) {
-          console.warn('Error leyendo proyecto previo:', e);
         }
+      } catch (e) {
+        console.warn('Error leyendo proyecto previo:', e);
+      }
+
+      const savedActiveId = localStorage.getItem('seneca_cf_active_project_id');
+      let activeProj: SenecaProject | null = null;
+      if (catalog.length > 0) {
+        activeProj = catalog.find((p) => p.id === savedActiveId) || catalog[0];
       }
 
       if (activeProj) {
+        isApplyingRemoteRef.current = true;
+        projectIdRef.current = activeProj.id || 'seneca-default-project';
+        lastSyncedSignatureRef.current = getProjectContentSignature(activeProj);
+
         setProjectId(activeProj.id || 'seneca-default-project');
         setProjectName(activeProj.name || 'Jornada 1 - Séneca CF vs Rival');
         setRivalName(activeProj.rival || 'Rival FC');
@@ -576,8 +954,8 @@ export default function App() {
           setTagCategories(
             activeProj.tag_categories.map((c: TagCategory) => ({
               ...c,
-              preRoll: 10,
-              postRoll: 10,
+              preRoll: c.preRoll || 10,
+              postRoll: c.postRoll || 10,
             }))
           );
         }
@@ -585,6 +963,10 @@ export default function App() {
           setPlaylists(activeProj.playlists);
         }
         setSavedProjects(catalog);
+
+        setTimeout(() => {
+          isApplyingRemoteRef.current = false;
+        }, 80);
 
         // ¡CARGAR VÍDEOS DESDE INDEXEDDB PARA ESTE PARTIDO!
         try {
@@ -597,7 +979,7 @@ export default function App() {
           console.warn('Error recuperando vídeos en arranque:', dbErr);
         }
       } else {
-        // Crear primer proyecto por defecto si está totalmente vacío
+        // Crear primer proyecto por defecto con fecha epoch (1970) para que NUNCA pise datos reales de Supabase
         const defaultProj: SenecaProject = {
           id: 'seneca-default-project',
           name: 'Jornada 1 - Séneca CF vs Rival',
@@ -611,8 +993,10 @@ export default function App() {
           markers: {},
           tag_categories: DEFAULT_TAG_CATEGORIES,
           playlists: DEFAULT_PLAYLISTS,
-          updated_at: new Date().toISOString(),
+          updated_at: new Date(0).toISOString(),
         };
+        projectIdRef.current = defaultProj.id;
+        lastSyncedSignatureRef.current = getProjectContentSignature(defaultProj);
         catalog = [defaultProj];
         setSavedProjects(catalog);
         localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
@@ -620,7 +1004,7 @@ export default function App() {
       }
 
       refreshProjectsVideoSummary();
-      fetchProjectsFromSupabase();
+      await fetchProjectsFromSupabase({ isInitial: true });
     };
 
     initializeAppProjects();
@@ -631,70 +1015,110 @@ export default function App() {
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-  }, [refreshProjectsVideoSummary]);
+  }, [refreshProjectsVideoSummary, fetchProjectsFromSupabase]);
 
-  const fetchProjectsFromSupabase = async () => {
-    setSupabaseStatus('syncing');
-    try {
-      const { data, error } = await supabase
-        .from('seneca_projects')
-        .select('*')
-        .order('updated_at', { ascending: false })
-        .limit(30);
+  // Suscripción en tiempo real (Broadcast instantáneo + Postgres Changes + Sondeo cada 3.5s)
+  useEffect(() => {
+    const handleIncomingRemoteProject = (rawProj: any) => {
+      if (!rawProj || !rawProj.id) return;
+      const incoming = normalizeRemoteProject(rawProj);
+      updateProjectInCatalog(incoming);
+      setSupabaseStatus('synced');
 
-      if (error) {
-        setSupabaseStatus('local_only');
-      } else {
-        setSupabaseStatus('synced');
-        if (data && data.length > 0) {
-          const remoteProjects = data as SenecaProject[];
-          const rawCatalog = localStorage.getItem('seneca_projects_catalog');
-          let localCatalog: SenecaProject[] = rawCatalog ? JSON.parse(rawCatalog) : [];
-          if (!Array.isArray(localCatalog)) localCatalog = [];
+      if (incoming.id === projectIdRef.current && !isDirtyLocalRef.current) {
+        applyProjectToActiveState(incoming);
+      }
+    };
 
-          const mergedMap = new Map<string, SenecaProject>();
-          remoteProjects.forEach((p) => mergedMap.set(p.id, p));
-          localCatalog.forEach((lp) => {
-            const remote = mergedMap.get(lp.id);
-            if (!remote || new Date(lp.updated_at || 0) > new Date(remote.updated_at || 0)) {
-              mergedMap.set(lp.id, lp);
-            }
-          });
+    const handleIncomingDelete = (deletedId: string) => {
+      if (!deletedId) return;
+      try {
+        const raw = localStorage.getItem('seneca_projects_catalog');
+        let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(catalog)) {
+          catalog = catalog.filter((p) => p.id !== deletedId);
+          localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
+          setSavedProjects(catalog);
+        }
+      } catch {
+        //
+      }
+    };
 
-          const finalCatalog = Array.from(mergedMap.values()).sort(
-            (a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
-          );
-
-          setSavedProjects(finalCatalog);
-          try {
-            localStorage.setItem('seneca_projects_catalog', JSON.stringify(finalCatalog));
-          } catch {
-            //
+    const channel = supabase
+      .channel('seneca-live-sync')
+      .on('broadcast', { event: 'project_sync' }, (msg) => {
+        const payload = msg?.payload;
+        if (!payload || payload.senderId === clientInstanceIdRef.current) return;
+        if (payload.project) {
+          handleIncomingRemoteProject(payload.project);
+        }
+      })
+      .on('broadcast', { event: 'project_delete' }, (msg) => {
+        const payload = msg?.payload;
+        if (!payload || payload.senderId === clientInstanceIdRef.current) return;
+        if (payload.projectId) {
+          handleIncomingDelete(payload.projectId);
+        }
+      })
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'seneca_projects' },
+        (payload: any) => {
+          if (payload.eventType === 'DELETE' && payload.old?.id) {
+            handleIncomingDelete(payload.old.id);
+          } else if (payload.new && payload.new.id) {
+            handleIncomingRemoteProject(payload.new);
           }
         }
+      )
+      .subscribe();
+
+    realtimeChannelRef.current = channel;
+
+    const pollInterval = setInterval(() => {
+      if (hasInitialCloudSyncRef.current && !isDirtyLocalRef.current) {
+        fetchProjectsFromSupabase({ silent: true });
       }
-    } catch {
-      setSupabaseStatus('local_only');
-    }
-  };
+    }, 3500);
 
-  // Cambiar de partido: guarda el actual, carga el destino y su vídeo desde IndexedDB
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible' && hasInitialCloudSyncRef.current && !isDirtyLocalRef.current) {
+        fetchProjectsFromSupabase({ silent: true });
+      }
+    };
+
+    window.addEventListener('focus', handleVisibilityOrFocus);
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+
+    return () => {
+      clearInterval(pollInterval);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      supabase.removeChannel(channel);
+      realtimeChannelRef.current = null;
+    };
+  }, [applyProjectToActiveState, fetchProjectsFromSupabase, updateProjectInCatalog]);
+
+  // Cambiar de partido: guarda el actual si tenía cambios, carga el destino y sincroniza con Supabase
   const switchProject = async (targetProjectId: string) => {
-    if (targetProjectId === projectId) return;
+    if (targetProjectId === projectIdRef.current) {
+      await fetchProjectsFromSupabase({ silent: false });
+      return;
+    }
 
-    // 1. Guardar el estado actual antes de cambiar
-    const currentPayload = getProjectPayload();
-    updateProjectInCatalog(currentPayload);
-    try {
-      supabase.from('seneca_projects').upsert(currentPayload, { onConflict: 'id' }).then();
-    } catch {
-      // Ignorar error de red
+    // 1. Guardar el estado actual antes de cambiar solo si ya sincronizó y tiene cambios locales
+    if (hasInitialCloudSyncRef.current && isDirtyLocalRef.current) {
+      const currentPayload = getProjectPayload();
+      updateProjectInCatalog(currentPayload);
+      pushProjectToCloud(currentPayload);
+      isDirtyLocalRef.current = false;
     }
 
     // 2. Limpiar URLs de vídeos actuales en memoria
     revokeProjectBlobUrls(videos);
 
-    // 3. Buscar el proyecto destino
+    // 3. Buscar el proyecto destino (en memoria, localStorage o Supabase)
     let target = savedProjects.find((p) => p.id === targetProjectId);
     if (!target) {
       try {
@@ -706,54 +1130,36 @@ export default function App() {
       }
     }
 
+    try {
+      const { data: remoteRow } = await supabase
+        .from('seneca_projects')
+        .select('*')
+        .eq('id', targetProjectId)
+        .maybeSingle();
+      if (remoteRow) {
+        const normalizedRemote = normalizeRemoteProject(remoteRow);
+        const localEventsLen = target?.events?.length || 0;
+        const remoteEventsLen = normalizedRemote.events?.length || 0;
+        if (
+          !target ||
+          remoteEventsLen > localEventsLen ||
+          new Date(normalizedRemote.updated_at || 0) >= new Date(target.updated_at || 0)
+        ) {
+          target = normalizedRemote;
+          updateProjectInCatalog(normalizedRemote);
+        }
+      }
+    } catch {
+      //
+    }
+
     if (!target) {
       notify('No se encontró el partido seleccionado');
       return;
     }
 
-    // 4. Establecer datos del nuevo partido
-    setProjectId(target.id);
-    setProjectName(target.name || 'Partido Séneca CF');
-    setRivalName(target.rival || 'Rival FC');
-    setCompetition(target.competition || 'División de Honor / Liga Nacional');
-    setEvents(sanitizeLoadedEvents(target.events));
-    setCaptures(Array.isArray(target.captures) ? target.captures : []);
-    setDrawings(Array.isArray(target.drawings) ? target.drawings : []);
-    setMarkers(target.markers || {});
-    if (target.tag_categories && target.tag_categories.length > 0) {
-      setTagCategories(
-        target.tag_categories.map((c) => ({
-          ...c,
-          preRoll: 10,
-          postRoll: 10,
-        }))
-      );
-    }
-    if (target.playlists && target.playlists.length > 0) {
-      setPlaylists(target.playlists);
-    }
-
-    localStorage.setItem('seneca_cf_active_project_id', target.id);
-    try {
-      localStorage.setItem('seneca_cf_current_project', JSON.stringify(target));
-    } catch {
-      //
-    }
-
-    // 5. Cargar vídeos de este partido desde IndexedDB
-    try {
-      const matchVideos = await getVideosForProject(target.id);
-      setVideos(matchVideos);
-      if (matchVideos.length > 0) {
-        setActiveVideoId(matchVideos[0].id);
-      } else {
-        setActiveVideoId(null);
-      }
-    } catch (err) {
-      console.warn('Error cargando vídeos del nuevo partido:', err);
-      setVideos([]);
-      setActiveVideoId(null);
-    }
+    // 4. Establecer datos del partido destino y sus vídeos en IndexedDB
+    await applyProjectToActiveState(target, { switchId: true });
 
     setCurrentTime(0);
     setIsPlaying(false);
@@ -763,9 +1169,12 @@ export default function App() {
 
   // Crear un nuevo partido limpio
   const createNewProject = async (customName?: string, customRival?: string) => {
-    // 1. Guardar el actual
-    const currentPayload = getProjectPayload();
-    updateProjectInCatalog(currentPayload);
+    // 1. Guardar el actual si ya había sincronizado
+    if (hasInitialCloudSyncRef.current) {
+      const currentPayload = getProjectPayload();
+      updateProjectInCatalog(currentPayload);
+      pushProjectToCloud(currentPayload);
+    }
 
     // 2. Limpiar URLs de vídeos
     revokeProjectBlobUrls(videos);
@@ -790,6 +1199,11 @@ export default function App() {
       updated_at: new Date().toISOString(),
     };
 
+    isApplyingRemoteRef.current = true;
+    projectIdRef.current = newId;
+    lastSyncedSignatureRef.current = getProjectContentSignature(newProj);
+    isDirtyLocalRef.current = false;
+
     setProjectId(newId);
     setProjectName(pName);
     setRivalName(rName);
@@ -803,6 +1217,10 @@ export default function App() {
     setCurrentTime(0);
     setIsPlaying(false);
 
+    setTimeout(() => {
+      isApplyingRemoteRef.current = false;
+    }, 80);
+
     try {
       const raw = localStorage.getItem('seneca_projects_catalog');
       let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
@@ -815,11 +1233,7 @@ export default function App() {
       //
     }
 
-    try {
-      supabase.from('seneca_projects').upsert(newProj, { onConflict: 'id' }).then();
-    } catch {
-      //
-    }
+    await pushProjectToCloud(newProj);
 
     refreshProjectsVideoSummary();
     notify('Nuevo partido creado. Ya puedes añadir el vídeo de este partido.');
@@ -844,9 +1258,21 @@ export default function App() {
       localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
       setSavedProjects(catalog);
 
-      // 3. Borrar de Supabase
+      // 3. Borrar de Supabase y notificar en tiempo real
       try {
         await supabase.from('seneca_projects').delete().eq('id', targetProjectId);
+        if (realtimeChannelRef.current) {
+          realtimeChannelRef.current
+            .send({
+              type: 'broadcast',
+              event: 'project_delete',
+              payload: {
+                senderId: clientInstanceIdRef.current,
+                projectId: targetProjectId,
+              },
+            })
+            .catch(() => {});
+        }
       } catch (e) {
         console.warn('Error borrando en Supabase:', e);
       }
@@ -868,21 +1294,32 @@ export default function App() {
     }
   };
 
-  // Auto-guardado seguro en LocalStorage + Supabase
+  // Auto-guardado en tiempo real en LocalStorage + Supabase (solo cuando hay cambios reales del usuario)
   useEffect(() => {
     const projectPayload = getProjectPayload();
+    const currentSignature = getProjectContentSignature(projectPayload);
+
+    if (
+      !hasInitialCloudSyncRef.current ||
+      isApplyingRemoteRef.current ||
+      currentSignature === lastSyncedSignatureRef.current
+    ) {
+      return;
+    }
+
+    isDirtyLocalRef.current = true;
 
     const timer = setTimeout(async () => {
+      const storagePayload = stripHeavyMediaFromProject({
+        ...projectPayload,
+        updated_at: new Date().toISOString(),
+      });
+      lastSyncedSignatureRef.current = getProjectContentSignature(storagePayload);
+
       try {
-        const storagePayload: SenecaProject = {
-          ...projectPayload,
-          events: events.map(({ drawingDataUrl, ...rest }) => rest as ClipEvent),
-          captures: captures.map(({ dataUrl, ...rest }) => rest as CaptureItem),
-        };
         localStorage.setItem('seneca_cf_current_project', JSON.stringify(storagePayload));
         localStorage.setItem('seneca_cf_active_project_id', projectId);
 
-        // Actualizar también en el catálogo local de partidos
         const rawCatalog = localStorage.getItem('seneca_projects_catalog');
         let catalog: SenecaProject[] = rawCatalog ? JSON.parse(rawCatalog) : [];
         if (!Array.isArray(catalog)) catalog = [];
@@ -898,20 +1335,12 @@ export default function App() {
         console.warn('Aviso guardado en localStorage:', err);
       }
 
-      try {
-        const { error } = await supabase.from('seneca_projects').upsert(projectPayload, { onConflict: 'id' });
-        if (!error) {
-          setSupabaseStatus('synced');
-        } else {
-          setSupabaseStatus('local_only');
-        }
-      } catch {
-        setSupabaseStatus('local_only');
-      }
-    }, 1200);
+      await pushProjectToCloud(storagePayload);
+      isDirtyLocalRef.current = false;
+    }, 400);
 
     return () => clearTimeout(timer);
-  }, [getProjectPayload, projectId, events, captures]);
+  }, [getProjectPayload, projectId, events, captures, pushProjectToCloud]);
 
   const activateClipPlayback = useCallback(
     (clip: ClipEvent, options?: { fromQueue?: boolean; holdManual?: boolean }) => {
@@ -3539,26 +3968,31 @@ ${xmlInstances}
           setSelectedEventId(null);
         }
 
-        // 2. Eliminar de otros partidos en catálogo si aplica
+        // 2. Eliminar de otros partidos en catálogo si aplica y sincronizar con Supabase
         if (clipMatchId !== projectId) {
           try {
             const raw = localStorage.getItem('seneca_projects_catalog');
             let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
             if (Array.isArray(catalog)) {
-              let updated = false;
+              let updatedProj: SenecaProject | null = null;
               catalog = catalog.map((p) => {
                 if (p && p.id === clipMatchId && Array.isArray(p.events)) {
                   const nextProjEvents = p.events.filter((e) => e && e.id !== clipId);
                   if (nextProjEvents.length !== p.events.length) {
-                    updated = true;
-                    return { ...p, events: nextProjEvents };
+                    updatedProj = {
+                      ...p,
+                      events: nextProjEvents,
+                      updated_at: new Date().toISOString(),
+                    };
+                    return updatedProj;
                   }
                 }
                 return p;
               });
-              if (updated) {
+              if (updatedProj) {
                 localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
                 setSavedProjects(catalog);
+                pushProjectToCloud(updatedProj);
               }
             }
           } catch (err) {
@@ -3614,6 +4048,7 @@ ${xmlInstances}
       pushHistory,
       activateClipPlayback,
       notify,
+      pushProjectToCloud,
     ]
   );
 
@@ -3634,25 +4069,33 @@ ${xmlInstances}
           setSelectedEventId(null);
         }
 
-        // 2. Eliminar de catálogo (otros partidos si aplica)
+        // 2. Eliminar de catálogo (otros partidos si aplica) y sincronizar con Supabase
         try {
           const raw = localStorage.getItem('seneca_projects_catalog');
           let catalog: SenecaProject[] = raw ? JSON.parse(raw) : [];
           if (Array.isArray(catalog)) {
-            let changed = false;
+            const modifiedProjects: SenecaProject[] = [];
             catalog = catalog.map((p) => {
               if (p && Array.isArray(p.events)) {
                 const nextProjEvents = p.events.filter((e) => e && !idsSet.has(e.id));
                 if (nextProjEvents.length !== p.events.length) {
-                  changed = true;
-                  return { ...p, events: nextProjEvents };
+                  const updatedP = {
+                    ...p,
+                    events: nextProjEvents,
+                    updated_at: new Date().toISOString(),
+                  };
+                  if (p.id !== projectId) {
+                    modifiedProjects.push(updatedP);
+                  }
+                  return updatedP;
                 }
               }
               return p;
             });
-            if (changed) {
+            if (modifiedProjects.length > 0 || nextEvents.length !== events.length) {
               localStorage.setItem('seneca_projects_catalog', JSON.stringify(catalog));
               setSavedProjects(catalog);
+              modifiedProjects.forEach((mp) => pushProjectToCloud(mp));
             }
           }
         } catch (err) {
@@ -3679,7 +4122,7 @@ ${xmlInstances}
         notify('Hubo un error al eliminar los cortes');
       }
     },
-    [events, selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify]
+    [events, projectId, selectedEventId, playingQueue, playingQueueIndex, pushHistory, notify, pushProjectToCloud]
   );
 
   const deleteClipsByIds = useCallback((clipIds: string[]) => {
@@ -4401,9 +4844,10 @@ ${xmlInstances}
                   {savedProjects.map((p) => {
                     const vInfo = projectsVideoSummary[p.id];
                     const hasVid = (vInfo && vInfo.count > 0) || (p.id === projectId && videos.length > 0);
+                    const cutsCount = p.id === projectId ? events.length : p.events?.length || 0;
                     return (
                       <option key={p.id} value={p.id}>
-                        {p.name} {hasVid ? '🎥' : ''} ({p.events?.length || 0} cortes)
+                        {p.name} {hasVid ? '🎥' : ''} ({cutsCount} cortes)
                       </option>
                     );
                   })}
@@ -9773,7 +10217,7 @@ ${xmlInstances}
                                 )}
 
                                 <span className="bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-semibold px-2 py-0.5 rounded">
-                                  ✂ {p.events?.length || 0} cortes clasificados
+                                  ✂ {isActive ? events.length : p.events?.length || 0} cortes clasificados
                                 </span>
                               </div>
                             </div>
@@ -9826,7 +10270,7 @@ ${xmlInstances}
                 <span>Estado Supabase Cloud:</span>
                 {supabaseStatus === 'synced' ? (
                   <span className="text-emerald-600 font-bold flex items-center gap-1">
-                    <Cloud className="w-3.5 h-3.5" /> Conectado y Sincronizado
+                    <Cloud className="w-3.5 h-3.5" /> Conectado y Sincronizado en Tiempo Real
                   </span>
                 ) : supabaseStatus === 'syncing' ? (
                   <span className="text-amber-600 font-bold flex items-center gap-1">
@@ -9842,15 +10286,14 @@ ${xmlInstances}
               <div className="flex items-center gap-2">
                 <button
                   onClick={async () => {
-                    const currentPayload = getProjectPayload();
+                    const currentPayload = stripHeavyMediaFromProject({
+                      ...getProjectPayload(),
+                      updated_at: new Date().toISOString(),
+                    });
+                    lastSyncedSignatureRef.current = getProjectContentSignature(currentPayload);
                     updateProjectInCatalog(currentPayload);
-                    try {
-                      await supabase.from('seneca_projects').upsert(currentPayload, { onConflict: 'id' });
-                      setSupabaseStatus('synced');
-                    } catch {
-                      setSupabaseStatus('local_only');
-                    }
-                    notify('Partido guardado y sincronizado correctamente');
+                    await pushProjectToCloud(currentPayload);
+                    notify('Partido y cortes sincronizados en tiempo real');
                   }}
                   className="px-3.5 py-1.5 bg-[#cc2016] hover:bg-[#a81810] text-white text-xs font-bold rounded flex items-center gap-1 shadow-sm transition"
                 >
